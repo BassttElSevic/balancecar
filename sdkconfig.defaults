@@ -1,0 +1,47 @@
+# ============================================================
+# balancecar — ESP32-P4 默认配置
+# 这些值会作为 sdkconfig 的初始值，实测硬件参数见 README
+# ============================================================
+
+# ---- 目标芯片 ----
+CONFIG_IDF_TARGET="esp32p4"
+
+# ---- Flash ----
+# 实测：GigaDevice 32MB (ID c8/4019)
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="32MB"
+# ROM 自检时报到 "SPI mode:DIO"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+# P4 可选 20/40/80/120MHz，默认 80MHz
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# ---- 串口控制台 ----
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# ---- 日志 ----
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+# ---- FreeRTOS 时基 ----
+# 电机控制环需要 1ms 级定时精度。
+# 默认 CONFIG_FREERTOS_HZ=100 时 pdMS_TO_TICKS(1) == 0，
+# 会让 vTaskDelay(0) 退化成“不让出 CPU”，直接卡死 IDLE 任务并触发看门狗。
+CONFIG_FREERTOS_HZ=1000
+
+# ---- 分区表 ----
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# ---- CPU ----
+# ESP32-P4 双核 + LP 核，最高 400MHz
+# 注意：360MHz 选项仅在 ESP32P4_SELECTS_REV_LESS_V3=y (rev<3.0) 时存在
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+
+# ---- 芯片修订版本 ----
+# 实测芯片为 rev v3.2；rev<3.0 与 rev>=3.0 互斥，默认即为 rev>=3.0
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+
+# ---- PSRAM ----
+# 暂时关闭：等确认板上 PSRAM 实际容量后再开启
+# CONFIG_SPIRAM=y
