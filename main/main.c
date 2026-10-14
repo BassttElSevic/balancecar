@@ -194,6 +194,51 @@ static void wait_operator(const char *prompt, int timeout_ms)
     fflush(stdout);
 }
 
+
+/*
+ * 极性判定（在零点偏移标定之后）
+ *
+ * 偏移调到 |Id| 最小之后，电流矢量已经落在 q 轴上，但可能在 -q 方向。
+ * 全局翻转两路符号等价于把轴系再转 180°，所以这一步只需要判断 Iq 的符号。
+ */
+static void polarity_fix(foc_motor_t *m)
+{
+    printf("\n---- 极性判定 (Uq = %+.2f V) ----\n", (double)APP_OFFSET_V);
+
+    s_ctrl_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
+    m->motion      = FOC_MOTION_TORQUE;
+    m->torque_ctrl = FOC_TORQUE_VOLTAGE;
+    m->target      = APP_OFFSET_V;
+    s_ctrl_paused  = false;
+    vTaskDelay(pdMS_TO_TICKS(APP_OFFSET_SETTLE_MS));
+
+    const int n = APP_OFFSET_AVG_MS / APP_TELEMETRY_MS;
+    float sd = 0.0f, sq = 0.0f;
+    for (int i = 0; i < n; i++) {
+        vTaskDelay(pdMS_TO_TICKS(APP_TELEMETRY_MS));
+        sd += m->current.d;
+        sq += m->current.q;
+    }
+    s_ctrl_paused = true;
+    m->target = APP_CS_V_ZERO;
+    vTaskDelay(pdMS_TO_TICKS(APP_OFFSET_SETTLE_MS));
+
+    const float id_avg = sd / (float)n;
+    const float iq_avg = sq / (float)n;
+    printf("      Id=%+.3f  Iq=%+.3f  ->  %s\n", (double)id_avg, (double)iq_avg,
+           (iq_avg < FOC_ZERO) ? "Iq 为负, 翻转两路极性" : "Iq 为正, 极性正确");
+
+    if (iq_avg < FOC_ZERO) {
+        m->current_sense->set_sign_a(m->current_sense->ctx, -1.0f);
+        m->current_sense->set_sign_b(m->current_sense->ctx, -1.0f);
+        printf("      已把 sign_a / sign_b 都翻成 -1\n");
+    }
+
+    s_ctrl_paused = false;
+    vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
+}
+
 /*
  * 零点偏移标定（扫一圈找 |Id| 最小）
  *
@@ -220,7 +265,7 @@ static float offset_sweep(foc_motor_t *m)
     const float step      = APP_OFFSET_STEP_DEG / RAD2DEG;
     const int   n         = APP_OFFSET_AVG_MS / APP_TELEMETRY_MS;
 
-    float best_off = 0.0f, best_iq = -1e9f, best_id = 0.0f;
+    float best_off = 0.0f, best_id = 1e9f, best_iq = 0.0f;
     bool  have = false;
 
     for (int k = 0; k < APP_OFFSET_STEPS; k++) {
@@ -254,7 +299,10 @@ static float offset_sweep(foc_motor_t *m)
                (fabsf(ad) < 0.05f) ? "Id 接近 0" : "");
         fflush(stdout);
 
-        if (!have || aq > best_iq) {
+        /* 判据: |Id| 最小（q 轴对齐）；|Id| 相同时取 |Iq| 大的 */
+        const float abs_d = fabsf(ad);
+        if (!have || abs_d < fabsf(best_id) - 1e-6f
+                  || (fabsf(abs_d - fabsf(best_id)) < 1e-6f && fabsf(aq) > fabsf(best_iq))) {
             best_off = off;
             best_id  = ad;
             best_iq  = aq;
@@ -263,7 +311,7 @@ static float offset_sweep(foc_motor_t *m)
     }
 
     m->zero_electric_angle = foc_normalize_angle(base + best_off);
-    printf("\n      => 最佳偏移 %+.0f°   (Id=%+.3f  Iq=%+.3f)\n",
+    printf("\n      => 最佳偏移 %+.0f°  (判据 |Id| 最小)   (Id=%+.3f  Iq=%+.3f)\n",
            (double)(best_off * RAD2DEG), (double)best_id, (double)best_iq);
     printf("         原始对齐值 %.1f° + 偏移 %+.0f° = %.1f°\n",
            (double)(base * RAD2DEG), (double)(best_off * RAD2DEG),
@@ -444,6 +492,7 @@ void app_main(void)
     /* ---- 零点偏移标定（需要按住转子） ---- */
     wait_operator("零点是歪的，请用手按住转子别让它动，然后按回车开始标定", APP_CS_PROMPT_MS);
     (void)offset_sweep(&s_foc);
+    polarity_fix(&s_foc);
 
     /* ---- 相电流极性自动判定 ---- */
     sign_calibration_test(&s_foc);
