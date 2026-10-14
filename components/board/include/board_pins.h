@@ -12,6 +12,7 @@
 #pragma once
 
 #include "driver/gpio.h"
+#include "hal/adc_types.h"
 
 /* ============================================================================
  *  1. 三相电机驱动 (L6234: IN1/IN2/IN3 + EN)
@@ -50,9 +51,13 @@
 
 #define BOARD_CS_A_GPIO         GPIO_NUM_21     /* ADC1_CH5 */
 #define BOARD_CS_B_GPIO         GPIO_NUM_20     /* ADC1_CH4 */
-#define BOARD_CS_ADC_UNIT       1               /* ADC_UNIT_1 */
-#define BOARD_CS_A_CHANNEL      5               /* ADC_CHANNEL_5 */
-#define BOARD_CS_B_CHANNEL      4               /* ADC_CHANNEL_4 */
+
+/* ADC 单元 / 通道 / 衰减 / 位宽 —— 全部用枚举宏，不出现裸数字 */
+#define BOARD_CS_ADC_UNIT       ADC_UNIT_1
+#define BOARD_CS_A_CHANNEL      ADC_CHANNEL_5
+#define BOARD_CS_B_CHANNEL      ADC_CHANNEL_4
+#define BOARD_CS_ATTEN          ADC_ATTEN_DB_12     /* 量程约 0 ~ 3.3V */
+#define BOARD_CS_BITWIDTH       ADC_BITWIDTH_12
 
 /* INA240A2 增益 50V/V，采样电阻 0.01Ω
  * 来源: DengFOC 源码 InlineCurrent.cpp

@@ -1,34 +1,13 @@
 /*
  * ============================================================================
- *  balancecar — AS5600 磁编码器驱动 (I2C)
+ *  encoder —— AS5600 实现
  *
- *  ┌─ I2C 初始化：严格照 ESP-IDF 官方例程 ────────────────────────────────
- *  │   examples/peripherals/i2c/i2c_basic/main/i2c_basic_example_main.c
- *  │     * i2c_new_master_bus() + i2c_master_bus_add_device()
- *  │     * bus:    clk_source = I2C_CLK_SRC_DEFAULT
- *  │               glitch_ignore_cnt = 7
- *  │               flags.enable_internal_pullup = true
- *  │     * device: dev_addr_length = I2C_ADDR_BIT_LEN_7
- *  │               scl_speed_hz = 400000
- *  │     * 读寄存器: i2c_master_transmit_receive(dev, &reg, 1, buf, len, 1000)
- *  │               （超时 = 官方例程的 1000 ms）
- *  └──────────────────────────────────────────────────────────────────────
- *
- *  ┌─ 读角度 + 多圈 + 速度的逻辑：照 DengFOC ─────────────────────────────
- *  │   ToanTech/DengFOC_Lib → DengFOC 库/V0.6 支持SVPWM算法/AS5600.cpp
- *  │     getSensorAngle()  读 0x0C, 掩码 (buf[1]&0x1FF) + ((buf[0]&0x1F)<<8)
- *  │                       返回 (readValue / 4096) * 2π
- *  │     Sensor_init()     begin → delay(500) → 连读 3 次
- *  │     Sensor_update()   d_angle = val - angle_prev;
- *  │                       |d_angle| > 0.8*2π 时圈数 ±1
- *  │     getAngle()        full_rotations*2π + angle_prev
- *  │     getVelocity()     (Δfull_rotations*2π + Δangle) / Ts
- *  └──────────────────────────────────────────────────────────────────────
+ *  I2C 走 components/i2c_bus；读角度/多圈/速度的逻辑逐行对齐 DengFOC。
  * ============================================================================
  */
 
 #include <math.h>
-#include <string.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,354 +15,330 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_timer.h"
-#include "driver/i2c_master.h"
+#include "esp_rom_sys.h"
 
-#include "board_pins.h"
 #include "encoder.h"
 
 static const char *TAG = "encoder";
 
-/* ---- AS5600 寄存器 ---- */
-#define AS5600_REG_ZMCO     0x00
-#define AS5600_REG_ZPOS     0x01
-#define AS5600_REG_MPOS     0x03
-#define AS5600_REG_MANG     0x05
-#define AS5600_REG_CONF     0x07
-#define AS5600_REG_STATUS   0x0B
-#define AS5600_REG_RAW      0x0C    /* DengFOC 用的就是这一个 */
-#define AS5600_REG_ANGLE    0x0E
-#define AS5600_REG_AGC      0x1A
-#define AS5600_REG_MAG      0x1B
-#define AS5600_REG_BURN     0xFF
-
-/* ---- 时序（DengFOC） ---- */
-#define AS5600_SETTLE_MS    500
-#define AS5600_PROBE_RETRY  10
-#define AS5600_PROBE_GAP_MS 50
-
-/* ---- I2C（官方例程） ---- */
-#define AS5600_I2C_TIMEOUT_MS 1000
-
 #define TWO_PI_F            6.28318530718f
+#define RAD_TO_DEG          (180.0f / (float)M_PI)
 
-/* DengFOC getSensorAngle() 里的位定义 */
-#define AS5600_BIT_RES      12
-#define AS5600_BITS_MSB     (11 - 7)                        /* 4 */
-#define AS5600_CPR          ((float)(1 << AS5600_BIT_RES))   /* 4096 */
-#define AS5600_LSB_USED     (AS5600_BIT_RES - AS5600_BITS_MSB)  /* 8 */
+/* DengFOC getSensorAngle() 里的位定义:
+ *   _bit_resolution = 12
+ *   _bits_used_msb  = 11 - 7 = 4
+ *   lsb_used        = 12 - 4 = 8
+ *   lsb_mask        = (2 << 8) - 1  -> 强转 uint8_t 后为 0xFF
+ *   msb_mask        = (2 << 4) - 1  -> 0x1F
+ */
+#define AS5600_BITS_MSB     (11 - 7)
+#define AS5600_LSB_USED     (AS5600_ANGLE_BITS - AS5600_BITS_MSB)
 
-typedef struct {
-    i2c_master_bus_handle_t bus;
-    i2c_master_dev_handle_t dev;
-    bool     ready;
-    bool     ok;
+/* DengFOC 的过零判据：单次角度跳变超过 0.8 圈认为跨过了 0/2π */
+#define AS5600_WRAP_THRESHOLD   (0.8f * TWO_PI_F)
 
-    /* ---- DengFOC Sensor_AS5600 同款状态 ---- */
-    float    angle_prev;         /* 上次机械角 0 ~ 2π */
-    int64_t  angle_prev_ts;      /* 上次时间戳 (us) */
-    int32_t  full_rotations;     /* 累计圈数 */
-    float    vel_angle_prev;     /* 上次算速度时的角度 */
-    int64_t  vel_angle_prev_ts;
-    int32_t  vel_full_rotations;
-
-    /* ---- 诊断（不影响主流程） ---- */
-    uint16_t raw;                /* 0x0C 原始 12bit */
-    uint16_t ang_reg;            /* 0x0E 参考 */
-    uint8_t  status;
-    uint8_t  agc;
-    uint16_t magnitude;
-    float    velocity;
-    uint32_t err_count;
-} encoder_ctx_t;
-
-static encoder_ctx_t s_enc;
+#define ENCODER_DEFAULT_SETTLE_MS   500u
 
 /* -------------------------------------------------------------------------- */
-/*          I2C 底层（形态照官方例程 i2c_basic）                              */
+/*  默认值                                                                     */
 /* -------------------------------------------------------------------------- */
 
-static esp_err_t as5600_read_reg(uint8_t reg, uint8_t *buf, size_t len)
+static void cfg_apply_defaults(encoder_cfg_t *c)
 {
-    return i2c_master_transmit_receive(s_enc.dev, &reg, 1, buf, len, AS5600_I2C_TIMEOUT_MS);
+    if (c->settle_ms      == 0) c->settle_ms      = ENCODER_SETTLE_MS_DEFAULT;
+    if (c->probe_retry    == 0) c->probe_retry    = ENCODER_PROBE_RETRY_DEFAULT;
+    if (c->probe_gap_ms   == 0) c->probe_gap_ms   = ENCODER_PROBE_GAP_MS_DEFAULT;
+    if (c->counts_per_rev == 0) c->counts_per_rev = (float)AS5600_COUNTS_PER_REV;
+    if (c->direction      == 0) c->direction      = 1.0f;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  读角度（DengFOC getSensorAngle 的等价实现）                                */
+/* -------------------------------------------------------------------------- */
 
 /**
- * @brief DengFOC 的 getSensorAngle()
- *        读 0x0C 两个字节，按 DengFOC 的掩码拼出 12bit，换算成 0 ~ 2π
+ * @brief 读 0x0C 两字节，按 DengFOC 的掩码拼出 12bit，换算成 0 ~ 2π
  */
-static esp_err_t as5600_get_sensor_angle(float *out_rad)
+static esp_err_t as5600_read_sensor_angle(encoder_t *enc, uint16_t *out_raw,
+                                          float *out_rad)
 {
-    uint8_t readArray[2] = {0};
-    ESP_RETURN_ON_ERROR(as5600_read_reg(AS5600_REG_RAW, readArray, 2), TAG, "读 0x0C 失败");
+    uint8_t buf[2] = {0};
+    ESP_RETURN_ON_ERROR(i2c_slave_read_reg(&enc->slave, AS5600_REG_RAW_ANGLE, buf, 2),
+                        TAG, "读 0x%02X 失败", AS5600_REG_RAW_ANGLE);
 
     /* 与 DengFOC 逐字一致 */
-    const uint8_t lsb_mask = (uint8_t)((2 << AS5600_LSB_USED) - 1);       /* 0x1FF */
-    const uint8_t msb_mask = (uint8_t)((2 << AS5600_BITS_MSB) - 1);       /* 0x1F  */
+    const uint8_t lsb_mask = (uint8_t)((2u << AS5600_LSB_USED) - 1u);
+    const uint8_t msb_mask = (uint8_t)((2u << AS5600_BITS_MSB) - 1u);
 
-    uint16_t readValue  = (uint16_t)(readArray[1] & lsb_mask);
-    readValue += (uint16_t)((readArray[0] & msb_mask) << AS5600_LSB_USED);
+    uint16_t read_value  = (uint16_t)(buf[1] & lsb_mask);
+    read_value += (uint16_t)((buf[0] & msb_mask) << AS5600_LSB_USED);
 
-    s_enc.raw = readValue & 0x0FFF;
-    *out_rad = ((float)readValue / AS5600_CPR) * TWO_PI_F;
+    *out_raw = read_value & AS5600_ANGLE_MASK;
+    *out_rad = ((float)read_value / enc->counts_per_rev) * TWO_PI_F * enc->direction;
     return ESP_OK;
 }
 
 /* -------------------------------------------------------------------------- */
-/*                                 初始化                                     */
+/*  生命周期                                                                   */
 /* -------------------------------------------------------------------------- */
 
-esp_err_t encoder_init(void)
+esp_err_t encoder_init(encoder_t *enc, i2c_bus_t *bus, const encoder_cfg_t *cfg)
 {
-    return encoder_init_pins(BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO);
-}
+    ESP_RETURN_ON_FALSE(enc && bus && cfg, ESP_ERR_INVALID_ARG, TAG, "参数为空");
+    ESP_RETURN_ON_FALSE(!enc->ready, ESP_ERR_INVALID_STATE, TAG, "编码器已初始化");
+    ESP_RETURN_ON_FALSE(cfg->addr7 != 0, ESP_ERR_INVALID_ARG, TAG, "从机地址不能为 0");
 
-esp_err_t encoder_deinit(void)
-{
-    if (s_enc.dev) {
-        i2c_master_bus_rm_device(s_enc.dev);
-        s_enc.dev = NULL;
-    }
-    if (s_enc.bus) {
-        i2c_del_master_bus(s_enc.bus);
-        s_enc.bus = NULL;
-    }
-    s_enc.ready = false;
-    s_enc.ok    = false;
-    return ESP_OK;
-}
+    encoder_cfg_t c = *cfg;
+    cfg_apply_defaults(&c);
 
-esp_err_t encoder_init_pins(int sda_gpio, int scl_gpio)
-{
-    ESP_LOGI(TAG, "初始化 AS5600: SDA=GPIO%d  SCL=GPIO%d  %d Hz",
-             sda_gpio, scl_gpio, BOARD_I2C_FREQ_HZ);
+    /* ---- 1) 挂载从机 ---- */
+    ESP_RETURN_ON_ERROR(i2c_slave_init(&enc->slave, bus, c.addr7, c.freq_hz),
+                        TAG, "挂载 AS5600 (0x%02X) 失败", c.addr7);
 
-    /* ---- 1) 总线（官方例程 i2c_basic 同款） ---- */
-    const i2c_master_bus_config_t bus_cfg = {
-        .i2c_port          = BOARD_I2C_PORT,
-        .sda_io_num        = sda_gpio,
-        .scl_io_num        = scl_gpio,
-        .clk_source        = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_enc.bus), TAG, "创建 I2C 总线失败");
+    /* ---- 2) DengFOC: Wire.begin() 之后 delay(500) ---- */
+    vTaskDelay(pdMS_TO_TICKS(c.settle_ms));
 
-    /* ---- 2) 挂载从机（官方例程 i2c_basic 同款） ---- */
-    const i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = ENCODER_I2C_ADDR,
-        .scl_speed_hz    = BOARD_I2C_FREQ_HZ,
-    };
-    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_enc.bus, &dev_cfg, &s_enc.dev),
-                        TAG, "挂载 AS5600 失败");
-
-    /* ---- 3) DengFOC Sensor_init(): wire->begin(); delay(500) ---- */
-    vTaskDelay(pdMS_TO_TICKS(AS5600_SETTLE_MS));
-
-    /* ---- 4) 探测（带重试） ---- */
-    esp_err_t probe = ESP_FAIL;
-    for (int i = 0; i < AS5600_PROBE_RETRY; i++) {
-        probe = i2c_master_probe(s_enc.bus, ENCODER_I2C_ADDR, AS5600_I2C_TIMEOUT_MS);
-        if (probe == ESP_OK) {
-            ESP_LOGI(TAG, "AS5600 探测成功 (第 %d 次尝试)", i + 1);
-            break;
-        }
-        ESP_LOGW(TAG, "AS5600 第 %d/%d 次探测无应答: %s",
-                 i + 1, AS5600_PROBE_RETRY, esp_err_to_name(probe));
-        vTaskDelay(pdMS_TO_TICKS(AS5600_PROBE_GAP_MS));
-    }
+    /* ---- 3) 探测（带重试） ---- */
+    const esp_err_t probe = i2c_bus_probe_retry(bus, c.addr7, c.probe_retry, c.probe_gap_ms);
     if (probe != ESP_OK) {
-        ESP_LOGE(TAG, "AS5600 (0x%02X) 在 SDA=GPIO%d/SCL=GPIO%d 上无应答: %s",
-                 ENCODER_I2C_ADDR, sda_gpio, scl_gpio, esp_err_to_name(probe));
+        (void)i2c_slave_deinit(&enc->slave);
         return probe;
     }
 
-    s_enc.ready = true;
+    enc->counts_per_rev = c.counts_per_rev;
+    enc->direction      = c.direction;
+    enc->ready          = true;
+    enc->err_count      = 0;
 
-    /* ---- 5) DengFOC Sensor_init() 的连读序列 ---- */
-    float a = 0.0f;
+    /* ---- 4) DengFOC Sensor_init() 的连读序列 ----
+     *     getSensorAngle();  delayMicroseconds(1);
+     *     vel_angle_prev = getSensorAngle();  vel_angle_prev_ts = micros();
+     *     delay(1);
+     *     getSensorAngle();  delayMicroseconds(1);
+     *     angle_prev = getSensorAngle();      angle_prev_ts = micros();
+     */
+    uint16_t raw = 0;
+    float    a   = 0.0f;
 
-    (void)as5600_get_sensor_angle(&a);                       /* getSensorAngle();        */
-    esp_rom_delay_us(1);                                     /* delayMicroseconds(1);    */
+    (void)as5600_read_sensor_angle(enc, &raw, &a);
+    esp_rom_delay_us(1);
 
-    (void)as5600_get_sensor_angle(&a);                       /* vel_angle_prev = ...     */
-    s_enc.vel_angle_prev    = a;
-    s_enc.vel_angle_prev_ts = esp_timer_get_time();
-    s_enc.vel_full_rotations = 0;
+    (void)as5600_read_sensor_angle(enc, &raw, &a);
+    enc->vel_angle_prev     = a;
+    enc->vel_angle_prev_ts  = esp_timer_get_time();
+    enc->vel_full_rotations = 0;
 
-    vTaskDelay(pdMS_TO_TICKS(1));                            /* delay(1);                */
-    (void)as5600_get_sensor_angle(&a);                       /* getSensorAngle();        */
-    esp_rom_delay_us(1);                                     /* delayMicroseconds(1);    */
+    vTaskDelay(pdMS_TO_TICKS(1));
+    (void)as5600_read_sensor_angle(enc, &raw, &a);
+    esp_rom_delay_us(1);
 
-    (void)as5600_get_sensor_angle(&a);                       /* angle_prev = ...         */
-    s_enc.angle_prev    = a;
-    s_enc.angle_prev_ts = esp_timer_get_time();
-    s_enc.full_rotations = 0;
-    s_enc.ok = true;
+    (void)as5600_read_sensor_angle(enc, &raw, &a);
+    enc->angle_prev     = a;
+    enc->angle_prev_ts  = esp_timer_get_time();
+    enc->full_rotations = 0;
 
-    ESP_LOGI(TAG, "AS5600 初始化完成: 0x%02X  raw(0x0C)=%u  angle0=%.4f rad (%.1f°)",
-             ENCODER_I2C_ADDR, s_enc.raw, (double)s_enc.angle_prev,
-             (double)(s_enc.angle_prev * 180.0f / (float)M_PI));
+    enc->raw_angle = raw;
+    enc->ok        = true;
+
+    (void)encoder_refresh_diag(enc);
+
+    ESP_LOGI(TAG, "AS5600 就绪: 0x%02X  0x0C=%u  初始单圈角 %.2f°  STATUS=0x%02X",
+             c.addr7, enc->raw_angle,
+             (double)(enc->angle_prev * RAD_TO_DEG), enc->status);
     return ESP_OK;
 }
 
-/* -------------------------------------------------------------------------- */
-/*            更新（照 DengFOC 的 Sensor_update()）                            */
-/* -------------------------------------------------------------------------- */
-
-float encoder_update(void)
+esp_err_t encoder_deinit(encoder_t *enc)
 {
-    if (!s_enc.ready) {
-        return s_enc.angle_prev;
-    }
+    ESP_RETURN_ON_FALSE(enc, ESP_ERR_INVALID_ARG, TAG, "句柄为空");
+    const esp_err_t err = i2c_slave_deinit(&enc->slave);
+    enc->ready = false;
+    enc->ok    = false;
+    return err;
+}
 
-    float val = 0.0f;
-    if (as5600_get_sensor_angle(&val) != ESP_OK) {
-        s_enc.err_count++;
-        s_enc.ok = false;
-        return s_enc.angle_prev;
+/* -------------------------------------------------------------------------- */
+/*  更新（DengFOC Sensor_update）                                              */
+/* -------------------------------------------------------------------------- */
+
+float encoder_update(encoder_t *enc)
+{
+    ESP_RETURN_ON_FALSE(enc && enc->ready, enc ? enc->angle_prev : 0.0f,
+                        TAG, "编码器未初始化");
+
+    uint16_t raw = 0;
+    float    val = 0.0f;
+    if (as5600_read_sensor_angle(enc, &raw, &val) != ESP_OK) {
+        enc->err_count++;
+        enc->ok = false;
+        return enc->angle_prev;
     }
 
     /* ---- DengFOC Sensor_update() ---- */
-    s_enc.angle_prev_ts = esp_timer_get_time();
+    enc->angle_prev_ts = esp_timer_get_time();
 
-    const float d_angle = val - s_enc.angle_prev;
-    /* 圈数检测：越过 0.8 圈认为跨过了 0/2π */
-    if (fabsf(d_angle) > (0.8f * TWO_PI_F)) {
-        s_enc.full_rotations += (d_angle > 0.0f) ? -1 : 1;
+    const float d_angle = val - enc->angle_prev;
+    if (fabsf(d_angle) > AS5600_WRAP_THRESHOLD) {
+        enc->full_rotations += (d_angle > 0.0f) ? -1 : 1;
     }
-    s_enc.angle_prev = val;
-    s_enc.ok = true;
-    return s_enc.angle_prev;
+    enc->angle_prev = val;
+    enc->raw_angle  = raw;
+    enc->ok         = true;
+    return enc->angle_prev;
 }
 
 /* -------------------------------------------------------------------------- */
-/*                                 访问器                                     */
+/*  导出                                                                       */
 /* -------------------------------------------------------------------------- */
 
-/** DengFOC getMechanicalAngle()：单圈机械角 0 ~ 2π */
-float encoder_get_single_turn(void)
+float encoder_get_single_turn(const encoder_t *enc)
 {
-    return s_enc.angle_prev;
+    return enc ? enc->angle_prev : 0.0f;
 }
 
-/** DengFOC getAngle()：多圈累计机械角 (rad) */
-float encoder_get_angle(void)
+float encoder_get_angle(const encoder_t *enc)
 {
-    return (float)s_enc.full_rotations * TWO_PI_F + s_enc.angle_prev;
+    return enc ? ((float)enc->full_rotations * TWO_PI_F + enc->angle_prev) : 0.0f;
 }
 
-/** DengFOC getVelocity()：rad/s */
-float encoder_get_velocity(void)
+float encoder_get_velocity(encoder_t *enc)
 {
-    float Ts = (float)(s_enc.angle_prev_ts - s_enc.vel_angle_prev_ts) * 1e-6f;
-    if (Ts <= 0.0f) {
-        Ts = 1e-3f;
+    ESP_RETURN_ON_FALSE(enc && enc->ready, 0.0f, TAG, "编码器未初始化");
+
+    float ts = (float)(enc->angle_prev_ts - enc->vel_angle_prev_ts) * 1e-6f;
+    if (ts <= 0.0f) {
+        ts = 1e-3f;
     }
-    const float vel = ((float)(s_enc.full_rotations - s_enc.vel_full_rotations) * TWO_PI_F
-                       + (s_enc.angle_prev - s_enc.vel_angle_prev)) / Ts;
+    const float vel = ((float)(enc->full_rotations - enc->vel_full_rotations) * TWO_PI_F
+                       + (enc->angle_prev - enc->vel_angle_prev)) / ts;
 
-    s_enc.vel_angle_prev     = s_enc.angle_prev;
-    s_enc.vel_full_rotations = s_enc.full_rotations;
-    s_enc.vel_angle_prev_ts  = s_enc.angle_prev_ts;
-    s_enc.velocity = vel;
+    enc->vel_angle_prev     = enc->angle_prev;
+    enc->vel_full_rotations = enc->full_rotations;
+    enc->vel_angle_prev_ts  = enc->angle_prev_ts;
+    enc->velocity           = vel;
     return vel;
 }
 
-uint16_t encoder_get_raw(void)        { return s_enc.raw; }
-uint16_t encoder_get_raw_angle(void)  { return s_enc.ang_reg; }
-uint8_t  encoder_get_agc(void)        { return s_enc.agc; }
-uint16_t encoder_get_magnitude(void)  { return s_enc.magnitude; }
-uint8_t  encoder_get_status(void)     { return s_enc.status; }
-bool     encoder_is_ok(void)          { return s_enc.ok; }
-int32_t  encoder_get_full_rotations(void) { return s_enc.full_rotations; }
-
-void encoder_set_zero(void)
+int32_t encoder_get_full_rotations(const encoder_t *enc)
 {
-    s_enc.full_rotations = 0;
-    s_enc.angle_prev     = 0.0f;
-    ESP_LOGI(TAG, "机械角零点已设置");
+    return enc ? enc->full_rotations : 0;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                                 诊断                                       */
-/* -------------------------------------------------------------------------- */
-
-/** 刷新诊断寄存器（0x0E / STATUS / AGC / MAG）—— 不参与角度计算 */
-void encoder_refresh_diag(void)
+bool encoder_is_ok(const encoder_t *enc)
 {
-    uint8_t b[2] = {0};
-    if (as5600_read_reg(AS5600_REG_ANGLE, b, 2) == ESP_OK) {
-        s_enc.ang_reg = (uint16_t)(((uint16_t)b[0] << 8 | b[1]) & 0x0FFF);
-    }
-    if (as5600_read_reg(AS5600_REG_STATUS, &s_enc.status, 1) != ESP_OK) {
-        s_enc.status = 0;
-    }
-    if (as5600_read_reg(AS5600_REG_AGC, &s_enc.agc, 1) != ESP_OK) {
-        s_enc.agc = 0;
-    }
-    if (as5600_read_reg(AS5600_REG_MAG, b, 2) == ESP_OK) {
-        s_enc.magnitude = (uint16_t)((uint16_t)b[0] << 8 | b[1]);
-    }
+    return enc ? enc->ok : false;
 }
 
-void encoder_print_diag(void)
-{
-    const uint8_t st = s_enc.status;
-    printf("[编码器自检] AS5600 @0x%02X (SDA=GPIO%d SCL=GPIO%d)\n",
-           ENCODER_I2C_ADDR, BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO);
-    printf("   STATUS=0x%02X  MD=%d ML=%d MH=%d  -> %s\n",
-           st, (st >> 5) & 1, (st >> 4) & 1, (st >> 3) & 1,
-           !((st >> 5) & 1) ? "❌ 未检测到磁铁"
-                            : (((st >> 4) & 1) ? "⚠️ 磁场太弱"
-                                                : (((st >> 3) & 1) ? "⚠️ 磁场太强" : "✅ 磁铁正常")));
-    printf("   raw(0x0C)=%u (%.2f°)   angle(0x0E)=%u   AGC=%u   MAG=%u\n",
-           s_enc.raw, s_enc.raw * 360.0f / 4096.0f, s_enc.ang_reg, s_enc.agc, s_enc.magnitude);
-    printf("   机械角 %.4f rad   圈数 %ld   速度 %.4f rad/s   错误 %u\n",
-           (double)s_enc.angle_prev, (long)s_enc.full_rotations,
-           (double)s_enc.velocity, (unsigned)s_enc.err_count);
-}
+uint16_t encoder_get_raw_angle(const encoder_t *enc) { return enc ? enc->raw_angle : 0; }
+uint16_t encoder_get_angle_reg(const encoder_t *enc) { return enc ? enc->angle_reg : 0; }
+uint8_t  encoder_get_status(const encoder_t *enc)    { return enc ? enc->status    : 0; }
+uint8_t  encoder_get_agc(const encoder_t *enc)       { return enc ? enc->agc       : 0; }
+uint16_t encoder_get_magnitude(const encoder_t *enc) { return enc ? enc->magnitude : 0; }
+uint32_t encoder_get_err_count(const encoder_t *enc) { return enc ? enc->err_count : 0; }
 
-static void dump_u16(const char *name, uint8_t reg)
+void encoder_set_zero(encoder_t *enc)
 {
-    uint8_t b[2] = {0};
-    if (as5600_read_reg(reg, b, 2) != ESP_OK) {
-        printf("   %-10s (0x%02X)  读取失败\n", name, reg);
+    if (!enc) {
         return;
     }
-    printf("   %-10s (0x%02X)  = 0x%02X%02X  (%u)\n",
-           name, reg, b[0], b[1], (unsigned)((uint16_t)b[0] << 8 | b[1]));
+    enc->full_rotations = 0;
+    enc->angle_prev     = 0.0f;
+    ESP_LOGI(TAG, "多圈角已清零");
 }
 
-static void dump_u8(const char *name, uint8_t reg, int is_status)
+/* -------------------------------------------------------------------------- */
+/*  诊断                                                                       */
+/* -------------------------------------------------------------------------- */
+
+esp_err_t encoder_refresh_diag(encoder_t *enc)
+{
+    ESP_RETURN_ON_FALSE(enc && enc->ready, ESP_ERR_INVALID_STATE, TAG, "编码器未初始化");
+
+    uint16_t v16 = 0;
+    uint8_t  v8  = 0;
+
+    if (i2c_slave_read_u16_be(&enc->slave, AS5600_REG_ANGLE, &v16) == ESP_OK) {
+        enc->angle_reg = v16 & AS5600_ANGLE_MASK;
+    }
+    if (i2c_slave_read_u8(&enc->slave, AS5600_REG_STATUS, &v8) == ESP_OK) {
+        enc->status = v8;
+    }
+    if (i2c_slave_read_u8(&enc->slave, AS5600_REG_AGC, &v8) == ESP_OK) {
+        enc->agc = v8;
+    }
+    if (i2c_slave_read_u16_be(&enc->slave, AS5600_REG_MAGNITUDE, &v16) == ESP_OK) {
+        enc->magnitude = v16;
+    }
+    return ESP_OK;
+}
+
+void encoder_print_diag(const encoder_t *enc)
+{
+    if (!enc) {
+        return;
+    }
+    const uint8_t st = enc->status;
+    const int md = (st >> AS5600_STATUS_MD_SHIFT) & 1;
+    const int ml = (st >> AS5600_STATUS_ML_SHIFT) & 1;
+    const int mh = (st >> AS5600_STATUS_MH_SHIFT) & 1;
+
+    printf("[编码器] AS5600 @0x%02X  SDA=GPIO%d SCL=GPIO%d\n",
+           (int)enc->slave.addr7, i2c_bus_get_sda(enc->slave.bus),
+           i2c_bus_get_scl(enc->slave.bus));
+    printf("   STATUS=0x%02X  MD=%d ML=%d MH=%d  -> %s\n", st, md, ml, mh,
+           !md ? "未检测到磁铁" : (ml ? "磁场太弱" : (mh ? "磁场太强" : "磁铁正常")));
+    printf("   0x0C=%u (%.2f°)   0x0E=%u   AGC=%u   MAG=%u\n",
+           enc->raw_angle, (double)(enc->raw_angle * 360.0f / (float)AS5600_COUNTS_PER_REV),
+           enc->angle_reg, enc->agc, enc->magnitude);
+    printf("   单圈角 %.4f rad   多圈 %ld 圈   角速度 %.4f rad/s   读失败 %lu 次\n",
+           (double)enc->angle_prev, (long)enc->full_rotations,
+           (double)enc->velocity, (unsigned long)enc->err_count);
+}
+
+static void dump_u16(const encoder_t *enc, const char *name, uint8_t reg)
+{
+    uint16_t v = 0;
+    if (i2c_slave_read_u16_be(&enc->slave, reg, &v) != ESP_OK) {
+        printf("   %-11s (0x%02X)  读取失败\n", name, reg);
+        return;
+    }
+    printf("   %-11s (0x%02X)  = 0x%04X  (%u)\n", name, reg, v, v);
+}
+
+static void dump_u8(const encoder_t *enc, const char *name, uint8_t reg, bool is_status)
 {
     uint8_t v = 0;
-    if (as5600_read_reg(reg, &v, 1) != ESP_OK) {
-        printf("   %-10s (0x%02X)  读取失败\n", name, reg);
+    if (i2c_slave_read_u8(&enc->slave, reg, &v) != ESP_OK) {
+        printf("   %-11s (0x%02X)  读取失败\n", name, reg);
         return;
     }
     if (is_status) {
-        printf("   %-10s (0x%02X)  = 0x%02X  MD=%d ML=%d MH=%d\n",
-               name, reg, v, (v >> 5) & 1, (v >> 4) & 1, (v >> 3) & 1);
+        printf("   %-11s (0x%02X)  = 0x%02X  MD=%d ML=%d MH=%d\n", name, reg, v,
+               (v >> AS5600_STATUS_MD_SHIFT) & 1,
+               (v >> AS5600_STATUS_ML_SHIFT) & 1,
+               (v >> AS5600_STATUS_MH_SHIFT) & 1);
     } else {
-        printf("   %-10s (0x%02X)  = 0x%02X  (%u)\n", name, reg, v, v);
+        printf("   %-11s (0x%02X)  = 0x%02X  (%u)\n", name, reg, v, v);
     }
 }
 
-void encoder_dump_regs(void)
+void encoder_dump_regs(const encoder_t *enc)
 {
-    printf("\n===== AS5600 寄存器 dump @0x%02X =====\n", ENCODER_I2C_ADDR);
-    dump_u8 ("ZMCO",      AS5600_REG_ZMCO,   0);
-    dump_u16("ZPOS",      AS5600_REG_ZPOS);
-    dump_u16("MPOS",      AS5600_REG_MPOS);
-    dump_u16("MANG",      AS5600_REG_MANG);
-    dump_u16("CONF",      AS5600_REG_CONF);
-    dump_u8 ("STATUS",    AS5600_REG_STATUS, 1);
-    dump_u16("RAW_ANGLE", AS5600_REG_RAW);
-    dump_u16("ANGLE",     AS5600_REG_ANGLE);
-    dump_u8 ("AGC",       AS5600_REG_AGC,    0);
-    dump_u16("MAGNITUDE", AS5600_REG_MAG);
-    dump_u8 ("BURN",      AS5600_REG_BURN,   0);
+    if (!enc || !enc->ready) {
+        return;
+    }
+    printf("\n===== AS5600 寄存器 dump @0x%02X =====\n", (int)enc->slave.addr7);
+    dump_u8 (enc, "ZMCO",        AS5600_REG_ZMCO,       false);
+    dump_u16(enc, "ZPOS",        AS5600_REG_ZPOS);
+    dump_u16(enc, "MPOS",        AS5600_REG_MPOS);
+    dump_u16(enc, "MANG",        AS5600_REG_MANG);
+    dump_u16(enc, "CONF",        AS5600_REG_CONF);
+    dump_u8 (enc, "STATUS",      AS5600_REG_STATUS,     true);
+    dump_u16(enc, "RAW_ANGLE",   AS5600_REG_RAW_ANGLE);
+    dump_u16(enc, "ANGLE",       AS5600_REG_ANGLE);
+    dump_u8 (enc, "AGC",         AS5600_REG_AGC,        false);
+    dump_u16(enc, "MAGNITUDE",   AS5600_REG_MAGNITUDE);
+    dump_u8 (enc, "BURN",        AS5600_REG_BURN,       false);
     printf("====================================\n\n");
     fflush(stdout);
 }
