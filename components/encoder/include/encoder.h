@@ -58,6 +58,12 @@ uint8_t  encoder_get_agc(void);
 /** @brief STATUS 寄存器 (0x0B)：bit5=MD 检测到磁铁, bit4=ML 太弱, bit3=MH 太强 */
 uint8_t  encoder_get_status(void);
 
+/** @brief 累计圈数（DengFOC full_rotations） */
+int32_t  encoder_get_full_rotations(void);
+
+/** @brief 刷新诊断寄存器 (0x0E / STATUS / AGC / MAG)，不参与角度计算 */
+void encoder_refresh_diag(void);
+
 /** @brief 磁场幅值 (0x1B/0x1C) */
 uint16_t encoder_get_magnitude(void);
 
