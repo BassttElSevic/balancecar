@@ -55,6 +55,9 @@ uint16_t encoder_get_raw_angle(void);
 /** @brief AGC 自动增益 (0x1A)，典型值 0~128；饱和表示磁场超范围 */
 uint8_t  encoder_get_agc(void);
 
+/** @brief STATUS 寄存器 (0x0B)：bit5=MD 检测到磁铁, bit4=ML 太弱, bit3=MH 太强 */
+uint8_t  encoder_get_status(void);
+
 /** @brief 磁场幅值 (0x1B/0x1C) */
 uint16_t encoder_get_magnitude(void);
 
@@ -66,3 +69,6 @@ void encoder_set_zero(void);
 
 /** @brief 打印诊断信息（磁铁状态、原始值等） */
 void encoder_print_diag(void);
+
+/** @brief dump AS5600 全部关键寄存器（ZMCO/ZPOS/MPOS/MANG/CONF/STATUS/RAW/ANGLE/AGC/MAG/BURN） */
+void encoder_dump_regs(void);
