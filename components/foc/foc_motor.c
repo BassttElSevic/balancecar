@@ -48,6 +48,7 @@ void foc_motor_default_cfg(foc_motor_cfg_t *cfg)
     cfg->velocity_limit        = FOC_DEF_VEL_LIM;
     cfg->voltage_sensor_align  = FOC_DEF_VOLTAGE_SENSOR_ALIGN;
     cfg->align_zero_offset     = FOC_ALIGN_ZERO_OFFSET_DEFAULT;
+    cfg->sensor_direction      = FOC_SENSOR_DIR_UNKNOWN;
 
     cfg->torque_ctrl           = FOC_TORQUE_VOLTAGE;
     cfg->motion                = FOC_MOTION_TORQUE;
@@ -132,7 +133,7 @@ esp_err_t foc_motor_init(foc_motor_t *m, const foc_motor_cfg_t *cfg,
     m->modulation_centered  = cfg->modulation_centered;
 
     /* 方向未知 / 电角度零点未知 -> 需要 align */
-    m->sensor_direction    = 0.0f;
+    m->sensor_direction    = cfg->sensor_direction;
     m->zero_electric_angle = 0.0f;
     m->aligned             = false;
 
@@ -722,22 +723,30 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
         vTaskDelay(pdMS_TO_TICKS(FOC_ALIGN_SETTLE_MS));
 
         const float moved = fabsf(mid_angle - end_angle);
+        ESP_LOGI(TAG, "正扫结束 mid=%.4f rad  反扫结束 end=%.4f rad  差值 moved=%.4f rad",
+                 (double)mid_angle, (double)end_angle, (double)moved);
+
+        /* SimpleFOC: moved < MIN_ANGLE_DETECT_MOVEMENT -> Failed to notice movement */
         if (moved < FOC_MIN_ANGLE_DETECT_MOVEMENT) {
-            ESP_LOGE(TAG, "对齐失败: 传感器没有检测到转动 (moved=%.4f rad)", (double)moved);
+            ESP_LOGE(TAG, "Failed to notice movement");
             (void)foc_motor_set_phase_voltage(m, 0.0f, 0.0f, 0.0f);
             return ESP_FAIL;
-        }
-        /* SimpleFOC: mid < end -> CCW(-1)，否则 CW(+1) */
-        m->sensor_direction = (mid_angle < end_angle) ? -1.0f : 1.0f;
-
-        /* 极对数自检（SimpleFOC 只告警不失败） */
-        if (fabsf(moved * (float)m->pole_pairs - FOC_2PI) > FOC_PP_CHECK_TOLERANCE) {
-            ESP_LOGW(TAG, "极对数自检未通过: 实测转动 %.4f rad, 按 %d 对极应为 %.4f rad",
-                     (double)moved, m->pole_pairs, (double)FOC_2PI);
+        } else if (mid_angle < end_angle) {
+            m->sensor_direction = FOC_SENSOR_DIR_CCW;
+            ESP_LOGI(TAG, "sensor dir: CCW");
         } else {
-            ESP_LOGI(TAG, "极对数自检通过");
+            m->sensor_direction = FOC_SENSOR_DIR_CW;
+            ESP_LOGI(TAG, "sensor dir: CW");
         }
-        ESP_LOGI(TAG, "传感器方向: %s", (m->sensor_direction > 0.0f) ? "CW(+1)" : "CCW(-1)");
+
+        /* PP check（SimpleFOC 只告警不失败） */
+        if (fabsf(moved * (float)m->pole_pairs - FOC_2PI) > FOC_PP_CHECK_TOLERANCE) {
+            ESP_LOGW(TAG, "PP check: fail - est. pp: %.2f", (double)(FOC_2PI / moved));
+        } else {
+            ESP_LOGI(TAG, "PP check: OK!");
+        }
+    } else {
+        ESP_LOGI(TAG, "Skip dir calib. (sensor_direction=%+.0f)", (double)m->sensor_direction);
     }
 
     /* 找电角度零点 */
@@ -757,6 +766,8 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
     vTaskDelay(pdMS_TO_TICKS(FOC_ALIGN_SETTLE_MS));
 
     m->aligned = true;
+    ESP_LOGI(TAG, "Zero elec. angle: %.4f rad (%.1f°)", (double)m->zero_electric_angle,
+             (double)(m->zero_electric_angle * FOC_RAD_TO_DEG));
     ESP_LOGI(TAG, "对齐完成: zero_electric_angle=%.4f rad (%.1f°)  direction=%+.0f  偏移=%+.1f°",
              (double)m->zero_electric_angle,
              (double)(m->zero_electric_angle * FOC_RAD_TO_DEG),

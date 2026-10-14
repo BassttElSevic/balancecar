@@ -80,6 +80,11 @@
 /* 极对数自检容差 (rad)：实测转动 x 极对数 与 2π 之差超过它就告警 */
 #define FOC_PP_CHECK_TOLERANCE  0.5f
 
+/* 传感器方向（对应官方 Direction 枚举）*/
+#define FOC_SENSOR_DIR_UNKNOWN   0.0f   /**< 自动判定 */
+#define FOC_SENSOR_DIR_CW        1.0f   /**< 顺时针 */
+#define FOC_SENSOR_DIR_CCW      -1.0f   /**< 逆时针 */
+
 /* 中点对齐调制的中心偏移比例（占驱动器相电压上限）*/
 #define FOC_MOD_CENTER_RATIO    0.5f
 
@@ -100,6 +105,7 @@ typedef struct {
     float    velocity_limit;         /**< 速度上限 (rad/s) */
     float    voltage_sensor_align;   /**< 传感器对齐时施加的电压 (V) */
     float    align_zero_offset;      /**< 对齐零点附加偏移 (rad)，修正 d/q 轴系偏差 */
+    float    sensor_direction;       /**< 0=自动判定, +1=CW, -1=CCW（对应官方 motor.sensor_direction）*/
 
     /* ---- 控制方式 ---- */
     foc_torque_ctrl_t torque_ctrl;   /**< 力矩环方式 */

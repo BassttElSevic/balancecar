@@ -51,6 +51,12 @@
 /*  对齐零点偏移（修正 d/q 轴系固定偏差）                                      */
 /* -------------------------------------------------------------------------- */
 
+/** 0=自动判定传感器方向; +1/-1=强制（对应官方 motor.sensor_direction）*/
+#define APP_SENSOR_DIRECTION           0.0f
+
+/** 1=跑我的零点扫描标定(非官方); 0=纯官方对齐（此时 Id 应本来就 ≈0）*/
+#define APP_RUN_OFFSET_SWEEP           0
+
 #define APP_ALIGN_ZERO_OFFSET       0.0f    /**< 基准偏移；标定由 offset_sweep 完成 */
 
 #define APP_OFFSET_STEP_DEG         45.0f   /**< 标定扫描步进 (电角度) */

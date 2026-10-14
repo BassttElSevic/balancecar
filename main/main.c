@@ -195,6 +195,7 @@ static void wait_operator(const char *prompt, int timeout_ms)
 }
 
 
+#if APP_RUN_OFFSET_SWEEP
 /*
  * 极性判定（在零点偏移标定之后）
  *
@@ -322,6 +323,7 @@ static float offset_sweep(foc_motor_t *m)
     vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
     return best_off;
 }
+#endif /* APP_RUN_OFFSET_SWEEP */
 
 /*
  * 相电流极性自动判定
@@ -452,6 +454,7 @@ void app_main(void)
     cfg.voltage_limit        = MOTOR_VOLTAGE_LIMIT;
     cfg.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE_V;
     cfg.align_zero_offset    = APP_ALIGN_ZERO_OFFSET;
+    cfg.sensor_direction     = APP_SENSOR_DIRECTION;
     cfg.current_limit        = MOTOR_CURRENT_LIMIT_A;
     cfg.velocity_limit       = MOTOR_VELOCITY_LIMIT_RADS;
     cfg.modulation           = FOC_MOD_SINE_PWM;
@@ -491,8 +494,12 @@ void app_main(void)
 
     /* ---- 零点偏移标定（需要按住转子） ---- */
     wait_operator("零点是歪的，请用手按住转子别让它动，然后按回车开始标定", APP_CS_PROMPT_MS);
+#if APP_RUN_OFFSET_SWEEP
     (void)offset_sweep(&s_foc);
     polarity_fix(&s_foc);
+#else
+    printf("\n    （APP_RUN_OFFSET_SWEEP=0：不跑零点扫描，直接用官方对齐结果）\n");
+#endif
 
     /* ---- 相电流极性自动判定 ---- */
     sign_calibration_test(&s_foc);
