@@ -40,12 +40,17 @@
 /* 占空比换算: compare = duty * PEAK */
 #define MOTOR_PWM_PEAK_TICKS    (MOTOR_PWM_PERIOD_TICKS / 2)
 
+/* 占空比范围与映射：0V -> 中点，±1 归一化相电压 -> ±半个量程 */
+#define MOTOR_DUTY_MIN          0.0f
+#define MOTOR_DUTY_MAX          1.0f
+#define MOTOR_DUTY_MIDPOINT     0.5f
+#define MOTOR_DUTY_GAIN         0.5f
+
 /* ---- 母线电压 / 相电压上限 (V) ---- */
-/* ★ 必须按实际给驱动板供电的电压修改 ★
- * L6234 的输出相电压 = duty * 母线电压，FOC 调制需要知道这个值 */
-#define MOTOR_SUPPLY_V          3.3f
+/* ★ 本板驱动板的 DC 母线电压 ★ */
+#define MOTOR_SUPPLY_V          12.0f
 /* 正弦调制的线性区：相电压基波幅值不超过母线的一半；
- * 用空间矢量调制时可改到 MOTOR_SUPPLY_V / √3 */
+ * 用空间矢量调制时可改到 MOTOR_SUPPLY_V / √3 (≈6.93V) */
 #define MOTOR_VOLTAGE_LIMIT     (MOTOR_SUPPLY_V * 0.5f)
 
 /* ============================================================================
@@ -73,6 +78,11 @@
  *     amp_gain = 50;
  *     volts_to_amps_ratio = 1.0 / 0.01 / 50 = 2.0 A/V
  * 灵敏度 = 0.01Ω x 50 = 0.50 V/A */
+/* 每相采样极性：相电流测得反向时把对应这一项改成 (-1)。
+ * 与 SimpleFOC 的 current_sense.gain_x *= -1 同义。 */
+#define BOARD_CS_A_SIGN         (+1)
+#define BOARD_CS_B_SIGN         (+1)
+
 #define BOARD_CS_SHUNT_OHMS     0.01f
 #define BOARD_CS_AMP_GAIN       50.0f
 /* 灵敏度 (V/A) */
@@ -90,11 +100,20 @@
 #define ENCODER_I2C_ADDR        0x36            /* AS5600 7bit 地址 */
 
 /* ============================================================================
- *  4. 电机参数
+ *  4. 电机参数 与控制限值
  * ============================================================================ */
 
 /* 极对数 (pole pairs) —— 云台电机常见 7 对极 */
-#define MOTOR_POLE_PAIRS        7
+#define MOTOR_POLE_PAIRS            7
 
 /* 编码器安装方向: +1 或 -1，视磁铁转向而定 */
-#define ENCODER_DIRECTION       (+1)
+#define ENCODER_DIRECTION           (+1)
+
+/* ---- 相电流上限 ---- */
+#define MOTOR_CURRENT_LIMIT_A       0.5f
+
+/* ---- 机械角速度上限 (rad/s) ---- */
+#define MOTOR_VELOCITY_LIMIT_RADS   20.0f
+
+/* ---- 传感器对齐时施加的相电压 (V) ---- */
+#define MOTOR_ALIGN_VOLTAGE_V       3.0f

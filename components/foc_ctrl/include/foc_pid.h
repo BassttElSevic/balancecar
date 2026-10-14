@@ -16,6 +16,9 @@
 
 #include "foc_defs.h"
 
+/* Tustin(梯形)积分的 1/2 系数 */
+#define FOC_PID_TUSTIN_HALF     0.5f
+
 /** @brief PID 状态（成员内部使用） */
 typedef struct {
     /* ---- 参数 ---- */

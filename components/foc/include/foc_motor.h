@@ -64,6 +64,15 @@
 #define FOC_ALIGN_STEPS             500
 #define FOC_ALIGN_STEP_DELAY_MS     2
 #define FOC_ALIGN_SETTLE_MS         200
+/* 极对数自检容差 (rad)：实测转动 x 极对数 与 2π 之差超过它就告警 */
+#define FOC_PP_CHECK_TOLERANCE  0.5f
+
+/* 中点对齐调制的中心偏移比例（占驱动器相电压上限）*/
+#define FOC_MOD_CENTER_RATIO    0.5f
+
+/* 对齐电压相对相电压上限的比例（SimpleFOC 默认 3V 是给 12V 母线用的，
+ * 这里改成按比例，换母线不用改代码）*/
+#define FOC_ALIGN_VOLTAGE_RATIO     0.7f
 
 /* -------------------------------------------------------------------------- */
 /*  配置                                                                       */
@@ -139,7 +148,8 @@ typedef struct {
     float    shaft_angle_sp;         /**< 目标角度 */
     float    feed_forward_velocity;  /**< 前馈速度 */
     foc_dq_t voltage;                /**< 待施加的 dq 电压 */
-    foc_dq_t current;                /**< 实测 dq 电流 */
+    foc_dq_t current;                /**< 实测 dq 电流（已低通） */
+    foc_abc_t current_abc;           /**< 实测三相电流（原始，供监视） */
     float    current_magnitude;      /**< dc_current 模式用的电流幅值 */
 
     /* ---- 控制器 ---- */

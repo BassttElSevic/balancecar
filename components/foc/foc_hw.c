@@ -31,9 +31,9 @@ static esp_err_t drv_set_phase_voltage(void *ctx, float ua, float ub, float uc, 
     if (vlimit <= 0.0f) {
         return ESP_ERR_INVALID_ARG;
     }
-    const float da = foc_clampf(ua / vlimit, 0.0f, 1.0f);
-    const float db = foc_clampf(ub / vlimit, 0.0f, 1.0f);
-    const float dc = foc_clampf(uc / vlimit, 0.0f, 1.0f);
+    const float da = foc_clampf(ua / vlimit, FOC_DUTY_MIN, FOC_DUTY_MAX);
+    const float db = foc_clampf(ub / vlimit, FOC_DUTY_MIN, FOC_DUTY_MAX);
+    const float dc = foc_clampf(uc / vlimit, FOC_DUTY_MIN, FOC_DUTY_MAX);
     return motor_set_duty(da, db, dc);
 }
 

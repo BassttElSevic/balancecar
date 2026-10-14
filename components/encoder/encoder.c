@@ -49,7 +49,7 @@ static void cfg_apply_defaults(encoder_cfg_t *c)
     if (c->probe_retry    == 0) c->probe_retry    = ENCODER_PROBE_RETRY_DEFAULT;
     if (c->probe_gap_ms   == 0) c->probe_gap_ms   = ENCODER_PROBE_GAP_MS_DEFAULT;
     if (c->counts_per_rev == 0) c->counts_per_rev = (float)AS5600_COUNTS_PER_REV;
-    if (c->direction      == 0) c->direction      = 1.0f;
+    if (c->direction      == 0) c->direction      = ENCODER_DEFAULT_DIRECTION;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -179,7 +179,7 @@ float encoder_update(encoder_t *enc)
 
     const float d_angle = val - enc->angle_prev;
     if (fabsf(d_angle) > AS5600_WRAP_THRESHOLD) {
-        enc->full_rotations += (d_angle > 0.0f) ? -1 : 1;
+        enc->full_rotations += (d_angle > 0.0f) ? -ENCODER_ROT_STEP : ENCODER_ROT_STEP;
     }
     enc->angle_prev = val;
     enc->raw_angle  = raw;
@@ -207,7 +207,7 @@ float encoder_get_velocity(encoder_t *enc)
 
     float ts = (float)(enc->angle_prev_ts - enc->vel_angle_prev_ts) * 1e-6f;
     if (ts <= 0.0f) {
-        ts = 1e-3f;
+        ts = ENCODER_DEFAULT_LSB_RATE;
     }
     const float vel = ((float)(enc->full_rotations - enc->vel_full_rotations) * TWO_PI_F
                        + (enc->angle_prev - enc->vel_angle_prev)) / ts;
@@ -288,7 +288,7 @@ void encoder_print_diag(const encoder_t *enc)
     printf("   STATUS=0x%02X  MD=%d ML=%d MH=%d  -> %s\n", st, md, ml, mh,
            !md ? "未检测到磁铁" : (ml ? "磁场太弱" : (mh ? "磁场太强" : "磁铁正常")));
     printf("   0x0C=%u (%.2f°)   0x0E=%u   AGC=%u   MAG=%u\n",
-           enc->raw_angle, (double)(enc->raw_angle * 360.0f / (float)AS5600_COUNTS_PER_REV),
+           enc->raw_angle, (double)(enc->raw_angle * ENCODER_DEG_PER_REV / (float)AS5600_COUNTS_PER_REV),
            enc->angle_reg, enc->agc, enc->magnitude);
     printf("   单圈角 %.4f rad   多圈 %ld 圈   角速度 %.4f rad/s   读失败 %lu 次\n",
            (double)enc->angle_prev, (long)enc->full_rotations,

@@ -52,6 +52,10 @@
 #define AS5600_REG_BURN        0xFF   /**< 烧录次数 */
 
 #define AS5600_COUNTS_PER_REV  4096   /**< 12bit，每圈 4096 计数 */
+#define ENCODER_DEFAULT_DIRECTION  1.0f  /**< 默认方向 */
+#define ENCODER_ROT_STEP       1      /**< 每次过零点圈的增量 */
+#define ENCODER_DEG_PER_REV    360.0f /**< 度/圈 */
+#define ENCODER_DEFAULT_LSB_RATE 1e-3f /**< 时间差异常时的回退 (s) */
 #define AS5600_ANGLE_BITS      12
 #define AS5600_ANGLE_MASK      0x0FFF
 

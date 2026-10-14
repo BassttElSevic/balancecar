@@ -26,8 +26,21 @@ static const uint16_t s_sine_lut[65] = {
     32610, 32679, 32729, 32758, 32768
 };
 
-#define SINE_LUT_LAST   (64u)
-#define SINE_LUT_SIZE   (64u * 4u * 256u)   /* 一整圈对应的定点刻度数 */
+/* 查找表取址用的定点定义（与 SimpleFOC 一致）*/
+#define SINE_LUT_POINTS     64u          /* 表点数 */
+#define SINE_LUT_QUARTERS   4u           /* 一圈分成 4 个象限 */
+#define SINE_LUT_FRAC_BITS  8u           /* 插值用的小数位 */
+#define SINE_LUT_FRAC_MASK  ((1u << SINE_LUT_FRAC_BITS) - 1u)
+#define SINE_LUT_PHASE_MASK 0xFFu        /* 象限内相位索引的掩码 */
+#define SINE_LUT_SIZE       (SINE_LUT_POINTS * SINE_LUT_QUARTERS * (1u << SINE_LUT_FRAC_BITS))
+#define SINE_LUT_SCALE      ((float)SINE_LUT_SIZE / FOC_2PI)
+
+#define SINE_LUT_AMPL_SCALE 32768.0f    /* 表值的满幅 */
+
+#define SINE_LUT_Q1_END     64u
+#define SINE_LUT_Q2_END     128u
+#define SINE_LUT_Q3_END     192u
+#define SINE_LUT_Q4_END     256u
 
 float foc_sin(float a)
 {
@@ -35,44 +48,44 @@ float foc_sin(float a)
     if (a < 0.0f) {
         a = -a;
         /* sin(-x) = -sin(x)，用符号位翻转，下面统一取值 */
-        const unsigned int i = (unsigned int)(a * ((float)SINE_LUT_SIZE / FOC_2PI));
-        const int frac = (int)(i & 0xffu);
-        unsigned int idx = (i >> 8) & 0xffu;
+        const unsigned int i = (unsigned int)(a * SINE_LUT_SCALE);
+        const int frac = (int)(i & SINE_LUT_FRAC_MASK);
+        unsigned int idx = (i >> SINE_LUT_FRAC_BITS) & SINE_LUT_PHASE_MASK;
         int t1, t2;
-        if (idx < 64u) {
+        if (idx < SINE_LUT_Q1_END) {
             t1 = (int)s_sine_lut[idx];
             t2 = (int)s_sine_lut[idx + 1u];
-        } else if (idx < 128u) {
-            t1 = (int)s_sine_lut[128u - idx];
-            t2 = (int)s_sine_lut[127u - idx];
-        } else if (idx < 192u) {
-            t1 = -(int)s_sine_lut[idx - 128u];
-            t2 = -(int)s_sine_lut[idx - 127u];
+        } else if (idx < SINE_LUT_Q2_END) {
+            t1 = (int)s_sine_lut[SINE_LUT_Q2_END - idx];
+            t2 = (int)s_sine_lut[SINE_LUT_Q2_END - 1u - idx];
+        } else if (idx < SINE_LUT_Q3_END) {
+            t1 = -(int)s_sine_lut[idx - SINE_LUT_Q2_END];
+            t2 = -(int)s_sine_lut[idx - SINE_LUT_Q2_END + 1u];
         } else {
-            t1 = -(int)s_sine_lut[256u - idx];
-            t2 = -(int)s_sine_lut[255u - idx];
+            t1 = -(int)s_sine_lut[SINE_LUT_Q4_END - idx];
+            t2 = -(int)s_sine_lut[SINE_LUT_Q4_END - 1u - idx];
         }
-        return -(1.0f / 32768.0f) * (float)(t1 + (((t2 - t1) * frac) >> 8));
+        return -(1.0f / SINE_LUT_AMPL_SCALE) * (float)(t1 + (((t2 - t1) * frac) >> SINE_LUT_FRAC_BITS));
     }
 
-    const unsigned int i = (unsigned int)(a * ((float)SINE_LUT_SIZE / FOC_2PI));
-    const int frac = (int)(i & 0xffu);
-    unsigned int idx = (i >> 8) & 0xffu;
+    const unsigned int i = (unsigned int)(a * SINE_LUT_SCALE);
+    const int frac = (int)(i & SINE_LUT_FRAC_MASK);
+    unsigned int idx = (i >> SINE_LUT_FRAC_BITS) & SINE_LUT_PHASE_MASK;
     int t1, t2;
-    if (idx < 64u) {
+    if (idx < SINE_LUT_Q1_END) {
         t1 = (int)s_sine_lut[idx];
         t2 = (int)s_sine_lut[idx + 1u];
-    } else if (idx < 128u) {
-        t1 = (int)s_sine_lut[128u - idx];
-        t2 = (int)s_sine_lut[127u - idx];
-    } else if (idx < 192u) {
-        t1 = -(int)s_sine_lut[idx - 128u];
-        t2 = -(int)s_sine_lut[idx - 127u];
+    } else if (idx < SINE_LUT_Q2_END) {
+        t1 = (int)s_sine_lut[SINE_LUT_Q2_END - idx];
+        t2 = (int)s_sine_lut[SINE_LUT_Q2_END - 1u - idx];
+    } else if (idx < SINE_LUT_Q3_END) {
+        t1 = -(int)s_sine_lut[idx - SINE_LUT_Q2_END];
+        t2 = -(int)s_sine_lut[idx - SINE_LUT_Q2_END + 1u];
     } else {
-        t1 = -(int)s_sine_lut[256u - idx];
-        t2 = -(int)s_sine_lut[255u - idx];
+        t1 = -(int)s_sine_lut[SINE_LUT_Q4_END - idx];
+        t2 = -(int)s_sine_lut[SINE_LUT_Q4_END - 1u - idx];
     }
-    return (1.0f / 32768.0f) * (float)(t1 + (((t2 - t1) * frac) >> 8));
+    return (1.0f / SINE_LUT_AMPL_SCALE) * (float)(t1 + (((t2 - t1) * frac) >> SINE_LUT_FRAC_BITS));
 }
 
 float foc_cos(float a)
@@ -103,16 +116,16 @@ float foc_atan2(float y, float x)
     /* a = min(|x|,|y|) / max(|x|,|y|)；分母加 FLT_MIN 避免除零 */
     const float mn = (abs_x < abs_y) ? abs_x : abs_y;
     const float mx = (abs_x < abs_y) ? abs_y : abs_x;
-    const float a  = mn / (mx + 1.17549435e-38f);
+    const float a  = mn / (mx + FOC_FLT_MIN);
 
     const float s = a * a;
-    float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
+    float r = ((FOC_ATAN2_C1 * s + FOC_ATAN2_C2) * s + FOC_ATAN2_C3) * s * a + a;
 
     if (abs_y > abs_x) {
-        r = FOC_PI_2 - 0.0000000149f - r;      /* 1.57079637 - r */
+        r = FOC_ATAN2_PI_2 - r;
     }
     if (x < 0.0f) {
-        r = FOC_PI - 0.0000004404f - r;        /* 3.14159274 - r */
+        r = FOC_ATAN2_PI - r;
     }
     if (y < 0.0f) {
         r = -r;
@@ -142,7 +155,7 @@ float foc_electrical_angle(float shaft_angle, int pole_pairs)
 foc_ab_t foc_clarke(foc_abc_t iabc)
 {
     /* SimpleFOC: 用 a + b + c = 0 的约束，把三相先去掉共模再变换 */
-    const float mid = (1.0f / 3.0f) * (iabc.a + iabc.b + iabc.c);
+    const float mid = FOC_ONE_THIRD * (iabc.a + iabc.b + iabc.c);
     const float a = iabc.a - mid;
     const float b = iabc.b - mid;
 
@@ -181,8 +194,8 @@ foc_abc_t foc_inverse_clarke(foc_ab_t uab)
 {
     const foc_abc_t out = {
         .a = uab.alpha,
-        .b = -0.5f * uab.alpha + FOC_SQRT3_2 * uab.beta,
-        .c = -0.5f * uab.alpha - FOC_SQRT3_2 * uab.beta,
+        .b = FOC_INV_CLARKE_K * uab.alpha + FOC_SQRT3_2 * uab.beta,
+        .c = FOC_INV_CLARKE_K * uab.alpha - FOC_SQRT3_2 * uab.beta,
     };
     return out;
 }

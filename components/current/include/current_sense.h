@@ -36,6 +36,10 @@
 #define CURRENT_SENSE_CAL_SAMPLES_DEFAULT   64   /**< 零点校准采样次数 */
 #define CURRENT_SENSE_CAL_DELAY_MS_DEFAULT  1    /**< 每次采样间隔 (ms) */
 
+/* 每相极性允许的取值 */
+#define CURRENT_SENSE_SIGN_POS              1.0f
+#define CURRENT_SENSE_SIGN_NEG             (-1.0f)
+
 /* -------------------------------------------------------------------------- */
 /*  配置                                                                       */
 /* -------------------------------------------------------------------------- */
@@ -51,6 +55,8 @@ typedef struct {
     int            gpio_b;       /**< BOARD_CS_B_GPIO，只用于日志 */
     float          shunt_ohms;   /**< BOARD_CS_SHUNT_OHMS */
     float          amp_gain;     /**< BOARD_CS_AMP_GAIN */
+    float          sign_a;       /**< A 相极性 +1/-1；0 -> +1 */
+    float          sign_b;       /**< B 相极性 +1/-1；0 -> +1 */
     int            cal_samples;  /**< 0 -> 64 */
     int            cal_delay_ms; /**< 0 -> 1 */
 } current_sense_cfg_t;
@@ -73,7 +79,11 @@ typedef struct {
     bool           ready;                  /**< 内部 */
     bool           calibrated;             /**< 是否已做过零点校准 */
 
-    float          v_per_a;                /**< 灵敏度 (V/A) */
+    float          v_per_a;                /**< 灵敏度 (V/A)，正数 */
+    float          sign_a;                 /**< A 相极性 +1/-1 */
+    float          sign_b;                 /**< B 相极性 +1/-1 */
+    float          gain_a;                 /**< A 相增益 (A/V)，带符号 */
+    float          gain_b;                 /**< B 相增益 (A/V)，带符号 */
     float          off_a_mv;               /**< A 相零点 (mV) */
     float          off_b_mv;               /**< B 相零点 (mV) */
     int            cal_samples;            /**< 校准采样次数 */
@@ -123,6 +133,20 @@ int   current_sense_get_mv_b(const current_sense_t *cs);
 
 float current_sense_get_offset_mv_a(const current_sense_t *cs);
 float current_sense_get_offset_mv_b(const current_sense_t *cs);
+
+/**
+ * @brief 设置某一相的极性 (+1/-1)
+ * @note 与 SimpleFOC 的 gain_a/gain_b 同义：相电流接反时把它翻过来。
+ *       改完立即生效（会重算 gain）。
+ */
+void current_sense_set_sign_a(current_sense_t *cs, float sign);
+void current_sense_set_sign_b(current_sense_t *cs, float sign);
+
+/** @brief 读回当前每相增益 (A/V，带符号) */
+float current_sense_get_gain_a(const current_sense_t *cs);
+float current_sense_get_gain_b(const current_sense_t *cs);
+float current_sense_get_sign_a(const current_sense_t *cs);
+float current_sense_get_sign_b(const current_sense_t *cs);
 
 bool     current_sense_is_calibrated(const current_sense_t *cs);
 uint32_t current_sense_get_err_count(const current_sense_t *cs);

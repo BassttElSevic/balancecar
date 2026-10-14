@@ -33,6 +33,18 @@
 #define FOC_120_D2R         2.09439510239f
 #define FOC_RPM_TO_RADS     0.10471975512f
 
+/* 反 Clarke 的公共系数：cos(120°) = -0.5 */
+#define FOC_INV_CLARKE_K    (-0.5f)
+/* 一半 */
+#define FOC_HALF            0.5f
+/* 三分之一 */
+#define FOC_ONE_THIRD       0.33333333333f
+/* 弧度 -> 度 */
+#define FOC_RAD_TO_DEG      (180.0f / FOC_PI)
+/* 无（表示“不设置/零值”的语义常量，便于阅读） */
+#define FOC_ZERO            0.0f
+#define FOC_ONE             1.0f
+
 /* -------------------------------------------------------------------------- */
 /*  向量结构                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -55,6 +67,14 @@ typedef struct {
     float b;
     float c;
 } foc_abc_t;
+
+/* atan2 多项式系数（源自 ODrive，SimpleFOC 同款） */
+#define FOC_ATAN2_C1        (-0.0464964749f)
+#define FOC_ATAN2_C2        0.15931422f
+#define FOC_ATAN2_C3        (-0.327622764f)
+#define FOC_ATAN2_PI_2      1.57079637f
+#define FOC_ATAN2_PI        3.14159274f
+#define FOC_FLT_MIN         1.17549435e-38f   /* FLT_MIN, 防止除零 */
 
 /* -------------------------------------------------------------------------- */
 /*  标量工具                                                                   */

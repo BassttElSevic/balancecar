@@ -76,6 +76,35 @@ void foc_motor_default_cfg(foc_motor_cfg_t *cfg)
 /*  生命周期                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/** @brief 把控制器的输出限幅钳到可用相电压之内 */
+static void clamp_limits_to_voltage(foc_motor_t *m)
+{
+    /*
+     * 为什么必须钳：
+     *   中点对齐调制的相电压是 ua = vlimit/2 + Uq*cos(θ)，
+     *   只有 |Uq| <= vlimit/2 时才不会撞到 [0, vlimit] 被削顶。
+     *   如果 PID 的输出限幅（SimpleFOC 默认是 DEF_POWER_SUPPLY = 12V）
+     *   远大于实际可用电压，积分会一路积到顶，调制器饱和，
+     *   磁场矢量失真，电机会剧烈抖动。
+     */
+    if (!foc_is_set(m->pid_current_q.limit) || m->pid_current_q.limit > m->voltage_limit) {
+        ESP_LOGW(TAG, "电流环 PID 限幅 %.2f V 超过相电压上限，已钳到 %.2f V",
+                 (double)m->pid_current_q.limit, (double)m->voltage_limit);
+        m->pid_current_q.limit = m->voltage_limit;
+        m->pid_current_d.limit = m->voltage_limit;
+    }
+    if (!foc_is_set(m->pid_velocity.limit) || m->pid_velocity.limit > m->voltage_limit) {
+        ESP_LOGW(TAG, "速度环 PID 限幅 %.2f V 超过相电压上限，已钳到 %.2f V",
+                 (double)m->pid_velocity.limit, (double)m->voltage_limit);
+        m->pid_velocity.limit = m->voltage_limit;
+    }
+    /* 对齐时施加的电压同样不能超过上限（SimpleFOC 默认 3V 是给 12V 母线用的）*/
+    if (m->voltage_sensor_align > m->voltage_limit) {
+        m->voltage_sensor_align = m->voltage_limit * FOC_ALIGN_VOLTAGE_RATIO;
+        ESP_LOGW(TAG, "对齐电压超过相电压上限，已改为 %.2f V", (double)m->voltage_sensor_align);
+    }
+}
+
 esp_err_t foc_motor_init(foc_motor_t *m, const foc_motor_cfg_t *cfg,
                          const foc_driver_t *driver,
                          const foc_sensor_t *sensor,
@@ -120,6 +149,9 @@ esp_err_t foc_motor_init(foc_motor_t *m, const foc_motor_cfg_t *cfg,
 
     foc_lpf_init(&m->lpf_velocity, cfg->lpf_velocity_tf, FOC_NOT_SET);
     foc_lpf_init(&m->lpf_angle, cfg->lpf_angle_tf, FOC_NOT_SET);
+
+    /* 防御：把各控制器限幅钳到实际可用相电压内（见函数里的说明）*/
+    clamp_limits_to_voltage(m);
 
     m->open_loop_timestamp = foc_micros();
     m->initialized         = true;
@@ -172,7 +204,11 @@ void foc_motor_set_modulation(foc_motor_t *m, foc_modulation_t mod, bool centere
 
 void foc_motor_set_voltage_limit(foc_motor_t *m, float v)
 {
-    if (m) m->voltage_limit = v;
+    if (!m) {
+        return;
+    }
+    m->voltage_limit = v;
+    clamp_limits_to_voltage(m);
 }
 
 void foc_motor_set_current_limit(foc_motor_t *m, float a)
@@ -242,12 +278,12 @@ esp_err_t foc_motor_set_phase_voltage(foc_motor_t *m, float uq, float ud, float 
     const float vlimit = m->driver->voltage_limit;
 
     if (m->modulation_centered) {
-        float center = vlimit * 0.5f;
+        float center = vlimit * FOC_MOD_CENTER_RATIO;
         if (m->modulation == FOC_MOD_SPACE_VECTOR_PWM) {
             /* 中点钳位：center 再减去 (Umax+Umin)/2 */
             const float umin = fminf(u.a, fminf(u.b, u.c));
             const float umax = fmaxf(u.a, fmaxf(u.b, u.c));
-            center -= (umax + umin) * 0.5f;
+            center -= (umax + umin) * FOC_MOD_CENTER_RATIO;
         }
         u.a += center;
         u.b += center;
@@ -275,6 +311,28 @@ float foc_loop_torque(foc_motor_t *m)
     return m->current_sp;
 }
 
+/**
+ * @brief 只读不控：把三相电流读出来、做 Clarke+Park、低通后存进 m->current
+ *
+ * 用于电压力矩模式下监视 Iq/Id（SimpleFOC test_current 的做法：
+ * 验证电流采样时电流环是【不闭合】的，电流只用来观察）。
+ */
+static void foc_read_current_for_monitor(foc_motor_t *m)
+{
+    if (!m->current_sense) {
+        return;
+    }
+    foc_abc_t iabc = { FOC_ZERO, FOC_ZERO, FOC_ZERO };
+    if (!m->current_sense->read_phase(m->current_sense->ctx, &iabc)) {
+        return;
+    }
+    m->current_abc = iabc;
+
+    const foc_dq_t idq = foc_park(foc_clarke(iabc), m->electrical_angle);
+    m->current.q = foc_lpf_run(&m->lpf_current_q, idq.q);
+    m->current.d = foc_lpf_run(&m->lpf_current_d, idq.d);
+}
+
 float foc_loop_current_dq(foc_motor_t *m)
 {
     ESP_RETURN_ON_FALSE(m && m->current_sense, 0.0f, TAG, "无电流采样接口");
@@ -287,6 +345,7 @@ float foc_loop_current_dq(foc_motor_t *m)
     if (!m->current_sense->read_phase(m->current_sense->ctx, &iabc)) {
         return 0.0f;
     }
+    m->current_abc = iabc;
     m->current = foc_park(foc_clarke(iabc), m->electrical_angle);
 
     /* 滤波 */
@@ -309,6 +368,7 @@ float foc_loop_current_dc(foc_motor_t *m)
     if (!m->current_sense->read_phase(m->current_sense->ctx, &iabc)) {
         return 0.0f;
     }
+    m->current_abc = iabc;
     /* 电流幅值：用 Park 变换后的 q 分量近似（与 SimpleFOC getDCCurrent 同思路） */
     const foc_dq_t idq = foc_park(foc_clarke(iabc), m->electrical_angle);
     m->current_magnitude = sqrtf(idq.d * idq.d + idq.q * idq.q);
@@ -422,6 +482,8 @@ void foc_motor_loop_foc(foc_motor_t *m)
         case FOC_TORQUE_VOLTAGE:
             m->voltage.q = foc_clampf(m->current_sp, -m->voltage_limit, m->voltage_limit);
             m->voltage.d = 0.0f;
+            /* 不闭环，但仍读电流供监视 */
+            foc_read_current_for_monitor(m);
             break;
         case FOC_TORQUE_DC_CURRENT:
             if (!m->current_sense) return;
@@ -536,7 +598,7 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
         m->sensor_direction = (mid_angle < end_angle) ? -1.0f : 1.0f;
 
         /* 极对数自检（SimpleFOC 只告警不失败） */
-        if (fabsf(moved * (float)m->pole_pairs - FOC_2PI) > 0.5f) {
+        if (fabsf(moved * (float)m->pole_pairs - FOC_2PI) > FOC_PP_CHECK_TOLERANCE) {
             ESP_LOGW(TAG, "极对数自检未通过: 实测转动 %.4f rad, 按 %d 对极应为 %.4f rad",
                      (double)moved, m->pole_pairs, (double)FOC_2PI);
         } else {
@@ -561,7 +623,7 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
     m->aligned = true;
     ESP_LOGI(TAG, "对齐完成: zero_electric_angle=%.4f rad (%.1f°)  direction=%+.0f",
              (double)m->zero_electric_angle,
-             (double)(m->zero_electric_angle * 180.0f / FOC_PI),
+             (double)(m->zero_electric_angle * FOC_RAD_TO_DEG),
              (double)m->sensor_direction);
     return ESP_OK;
 }

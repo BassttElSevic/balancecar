@@ -32,6 +32,15 @@ static void cfg_apply_defaults(current_sense_cfg_t *c)
 {
     if (c->cal_samples  == 0) c->cal_samples  = CURRENT_SENSE_CAL_SAMPLES_DEFAULT;
     if (c->cal_delay_ms == 0) c->cal_delay_ms = CURRENT_SENSE_CAL_DELAY_MS_DEFAULT;
+    if (c->sign_a == 0)       c->sign_a       = CURRENT_SENSE_SIGN_POS;
+    if (c->sign_b == 0)       c->sign_b       = CURRENT_SENSE_SIGN_POS;
+}
+
+/** @brief gain = sign / 灵敏度 (A/V, 带符号) */
+static void apply_gains(current_sense_t *cs)
+{
+    cs->gain_a = cs->sign_a / cs->v_per_a;
+    cs->gain_b = cs->sign_b / cs->v_per_a;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -77,9 +86,12 @@ esp_err_t current_sense_init(current_sense_t *cs, const current_sense_cfg_t *cfg
     cs->gpio_b      = c.gpio_b;
     cs->cal_samples = c.cal_samples;
     cs->v_per_a     = c.shunt_ohms * c.amp_gain;
+    cs->sign_a      = c.sign_a;
+    cs->sign_b      = c.sign_b;
 
     ESP_RETURN_ON_FALSE(cs->v_per_a > 0.0f, ESP_ERR_INVALID_ARG, TAG,
                         "灵敏度无效 (shunt=%f gain=%f)", (double)c.shunt_ohms, (double)c.amp_gain);
+    apply_gains(cs);
 
     /* ---- 1) ADC 单元 ---- */
     const adc_oneshot_unit_init_cfg_t unit_cfg = {
@@ -184,8 +196,9 @@ esp_err_t current_sense_calibrate(current_sense_t *cs)
     cs->calibrated = true;
 
     /* 用零点重新算一次三相，让校准后的诊断输出有意义 */
-    cs->ia = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V / cs->v_per_a;
-    cs->ib = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V / cs->v_per_a;
+    /* 与 SimpleFOC 一致：i = (v - offset) * gain，gain 带符号 */
+    cs->ia = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V * cs->gain_a;
+    cs->ib = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V * cs->gain_b;
     cs->ic = -cs->ia - cs->ib;
 
     ESP_LOGI(TAG, "零点校准完成 (%d 次): A=%.1f mV  B=%.1f mV",
@@ -202,8 +215,9 @@ esp_err_t current_sense_update(current_sense_t *cs)
     ESP_RETURN_ON_ERROR(read_one(cs, cs->chan_b, cs->cali_b, &cs->raw_b, &cs->mv_b),
                         TAG, "读 B 相失败");
 
-    cs->ia = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V / cs->v_per_a;
-    cs->ib = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V / cs->v_per_a;
+    /* 与 SimpleFOC 一致：i = (v - offset) * gain，gain 带符号 */
+    cs->ia = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V * cs->gain_a;
+    cs->ib = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V * cs->gain_b;
     cs->ic = -cs->ia - cs->ib;      /* 基尔霍夫 */
     return ESP_OK;
 }
@@ -224,6 +238,25 @@ int current_sense_get_mv_b(const current_sense_t *cs)  { return cs ? cs->mv_b  :
 float current_sense_get_offset_mv_a(const current_sense_t *cs) { return cs ? cs->off_a_mv : 0.0f; }
 float current_sense_get_offset_mv_b(const current_sense_t *cs) { return cs ? cs->off_b_mv : 0.0f; }
 
+void current_sense_set_sign_a(current_sense_t *cs, float sign)
+{
+    if (!cs) return;
+    cs->sign_a = (sign < 0.0f) ? CURRENT_SENSE_SIGN_NEG : CURRENT_SENSE_SIGN_POS;
+    apply_gains(cs);
+}
+
+void current_sense_set_sign_b(current_sense_t *cs, float sign)
+{
+    if (!cs) return;
+    cs->sign_b = (sign < 0.0f) ? CURRENT_SENSE_SIGN_NEG : CURRENT_SENSE_SIGN_POS;
+    apply_gains(cs);
+}
+
+float current_sense_get_gain_a(const current_sense_t *cs) { return cs ? cs->gain_a : 0.0f; }
+float current_sense_get_gain_b(const current_sense_t *cs) { return cs ? cs->gain_b : 0.0f; }
+float current_sense_get_sign_a(const current_sense_t *cs) { return cs ? cs->sign_a : 0.0f; }
+float current_sense_get_sign_b(const current_sense_t *cs) { return cs ? cs->sign_b : 0.0f; }
+
 bool     current_sense_is_calibrated(const current_sense_t *cs) { return cs ? cs->calibrated : false; }
 uint32_t current_sense_get_err_count(const current_sense_t *cs) { return cs ? cs->err_count : 0; }
 
@@ -232,8 +265,9 @@ void current_sense_print_diag(const current_sense_t *cs)
     if (!cs || !cs->ready) {
         return;
     }
-    printf("[电流] A=GPIO%d(CH%d)  B=GPIO%d(CH%d)  灵敏度 %.2f V/A\n",
-           cs->gpio_a, (int)cs->chan_a, cs->gpio_b, (int)cs->chan_b, (double)cs->v_per_a);
+    printf("[电流] A=GPIO%d(CH%d) 符号%+.0f   B=GPIO%d(CH%d) 符号%+.0f   灵敏度 %.2f V/A\n",
+           cs->gpio_a, (int)cs->chan_a, (double)cs->sign_a,
+           cs->gpio_b, (int)cs->chan_b, (double)cs->sign_b, (double)cs->v_per_a);
     printf("   A: raw=%4d  %4d mV  (零 %.1f)  Ia=%+7.3f A\n",
            cs->raw_a, cs->mv_a, (double)cs->off_a_mv, (double)cs->ia);
     printf("   B: raw=%4d  %4d mV  (零 %.1f)  Ib=%+7.3f A\n",

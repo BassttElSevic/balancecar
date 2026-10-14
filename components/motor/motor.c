@@ -195,8 +195,8 @@ esp_err_t motor_set_duty(float du, float dv, float dw)
             return ESP_ERR_INVALID_ARG;
         }
         /* 限幅到 0.0 ~ 1.0 */
-        if (duty[i] < 0.0f) duty[i] = 0.0f;
-        if (duty[i] > 1.0f) duty[i] = 1.0f;
+        if (duty[i] < MOTOR_DUTY_MIN) duty[i] = MOTOR_DUTY_MIN;
+        if (duty[i] > MOTOR_DUTY_MAX) duty[i] = MOTOR_DUTY_MAX;
 
         uint32_t cmp = (uint32_t)lrintf(duty[i] * (float)MOTOR_PWM_PEAK_TICKS);
         ESP_RETURN_ON_ERROR(mcpwm_comparator_set_compare_value(s_motor.cmpr[i], cmp),
@@ -207,15 +207,15 @@ esp_err_t motor_set_duty(float du, float dv, float dw)
 
 esp_err_t motor_set_uvw(float u, float v, float w)
 {
-    /* 归一化相电压 -1~+1 映射到占空比 0~1，0V 对应 50% */
-    return motor_set_duty(0.5f + 0.5f * u,
-                          0.5f + 0.5f * v,
-                          0.5f + 0.5f * w);
+    /* 归一化相电压 -1~+1 映射到占空比，0V 对应中点 */
+    return motor_set_duty(MOTOR_DUTY_MIDPOINT + MOTOR_DUTY_GAIN * u,
+                          MOTOR_DUTY_MIDPOINT + MOTOR_DUTY_GAIN * v,
+                          MOTOR_DUTY_MIDPOINT + MOTOR_DUTY_GAIN * w);
 }
 
 esp_err_t motor_zero(void)
 {
-    return motor_set_duty(0.5f, 0.5f, 0.5f);
+    return motor_set_duty(MOTOR_DUTY_MIDPOINT, MOTOR_DUTY_MIDPOINT, MOTOR_DUTY_MIDPOINT);
 }
 
 /* -------------------------------------------------------------------------- */

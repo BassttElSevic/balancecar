@@ -74,7 +74,8 @@ float foc_pid_run(foc_pid_t *pid, float error)
     const float proportional = pid->P * error;
 
     /* 积分项：Tustin（梯形）离散化  u_ik = u_ik_1 + I*dt/2*(ek + ek_1) */
-    float integral = pid->integral_prev + pid->I * dt * 0.5f * (error + pid->error_prev);
+    float integral = pid->integral_prev
+                   + pid->I * dt * FOC_PID_TUSTIN_HALF * (error + pid->error_prev);
     if (foc_is_set(pid->limit)) {
         integral = foc_clampf(integral, -pid->limit, pid->limit);   /* 抗饱和 */
     }
