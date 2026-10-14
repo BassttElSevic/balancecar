@@ -35,6 +35,9 @@ float current_get_c(void);
 /** @brief 两相采样的原始电压 (mV) —— 用于诊断引脚是否真的接上了 */
 int current_get_mv_a(void);
 int current_get_mv_b(void);
+/** @brief 两相采样的 12bit 原始值 (0~4095) —— 用于区分“ADC 没读到”和“换算错了” */
+int current_get_raw_a(void);
+int current_get_raw_b(void);
 /** @brief 零点电压 (mV) */
 float current_get_offset_mv_a(void);
 float current_get_offset_mv_b(void);

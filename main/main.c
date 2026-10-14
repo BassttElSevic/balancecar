@@ -163,9 +163,9 @@ void app_main(void)
             }
 
             if (cs_ok) {
-                printf("        电流     A:%4dmV Ia=%+6.3fA   B:%4dmV Ib=%+6.3fA   Ic=%+6.3fA\n",
-                       current_get_mv_a(), (double)current_get_a(),
-                       current_get_mv_b(), (double)current_get_b(),
+                printf("        电流     A:raw%4d %4dmV Ia=%+6.3fA   B:raw%4d %4dmV Ib=%+6.3fA   Ic=%+6.3fA\n",
+                       current_get_raw_a(), current_get_mv_a(), (double)current_get_a(),
+                       current_get_raw_b(), current_get_mv_b(), (double)current_get_b(),
                        (double)current_get_c());
             }
         }

@@ -5,17 +5,41 @@
 
 ---
 
-## 0. 一句话结论（当前状态）
+## 0. 结论（已修复）
 
-在**同一块板、同一个固件**里，同样的两个引脚：
+### 现象
+
+同一个固件里同样的两个引脚，两套 ADC 代码得到完全不同的结果：
 
 | ADC 代码路径 | GPIO21 (ADC1_CH5) | GPIO20 (ADC1_CH4) |
 | --- | --- | --- |
 | 官方例程 `examples/peripherals/adc/oneshot_read` 的写法 | raw ≈ **1701**（正常） | raw ≈ **1697**（正常） |
-| 本仓库 `components/current/current_sense.c` | raw ≈ **3467**，**卡死** | raw ≈ **5** |
+| 旧版 `components/current/current_sense.c` | raw ≈ **3467**，**卡死**（3360 mV） | raw ≈ **5** |
 
-**根因尚未确定。** 已排除：硬件/接线（用户示波器实测两脚有波形）、引脚↔通道映射、MCPWM、FreeRTOS、sdkconfig。
-**未解决的矛盾**见第 7 节。
+### 修复
+
+`components/current/current_sense.c` 已重写（见文件头注释）。
+关键改动：
+
+1. `adc_oneshot_unit_init_cfg_t` 用 `ADC_UNIT_1` / `ADC_ATTEN_DB_12` / `ADC_BITWIDTH_12` 直接写常量，不再经过 `(adc_unit_t)BOARD_CS_ADC_UNIT` / `CS_ATTEN` / `CS_BITWIDTH` 宏
+2. 校准句柄改成**每通道各一个**，并显式填 `.chan`（P4 上 `CONFIG_SOC_ADC_CALIB_CHAN_COMPENS_SUPPORTED=y`，校准是按通道补偿的）
+3. 读逻辑收拢到一个 `poll_one()` 里，直接返回 mV
+
+### 修复后的实测结果
+
+```text
+I (554) current: 电流采样初始化完成: A=GPIO21(ADC1_CH5)  B=GPIO20(ADC1_CH4)  0.50 V/A
+I (625) current: 零点校准完成: A(raw=1698) 1655.4 mV   B(raw=1698) 1655.4 mV
+I (628) encoder: AS5600 初始化完成 (地址 0x36, SDA=GPIO5 SCL=GPIO49)
+        电流     A:raw1798 1750mV Ia=+0.189A   B:raw1494 1454mV Ib=-0.403A   Ic=+0.213A
+```
+
+两路空闲时都回到 **1655.4 mV**（INA240 中点），电机一转电流就正常摆动。完整日志见 `diagnostics/logs/10_fixed_working.log`。
+
+> ⚠️ 诚实说明：**为什么旧写法会坏，根因没有完全定位。** 运行时配置值、编译选项、
+> 存储类别、校准句柄配置、提前读、调用顺序全部逐一验证为相同或无关（见第 6 节），
+> 但旧写法稳定坏、新写法稳定好。下面第 5、7 节保留完整的定位过程与原始数据，
+> 供后人继续查。另：现象 B（AS5600 偶发无应答）与本次修复无关，仍未处理。
 
 ---
 
@@ -262,33 +286,39 @@ I (574) current: 零点校准完成: A=3360.1 mV  B=16.3 mV  (共 256 次采样)
 
 ---
 
-## 7. 未解决的核心矛盾（请从这里接手）
+## 7. 定位过程中最硬的一组证据（已在同一固件内复现）
 
-> **同一块板、同一次启动、逐字段相同的 ADC 初始化，`current_sense.c` 得到 3467，手写等价代码得到 1701。**
+> **同一块板、同一次启动、逐字段相同的 ADC 初始化，旧 `current_sense_init()` 得到 3466，
+> 把同一段代码逐字复制到同一个文件里当普通函数，就得到 1700。**
 
-具体：
+最后一次二分（`diagnostics/logs/` 之外的临时试验）在同一固件内跑完，结果：
 
-| 实验 | ADC 初始化配置 | 结果 |
+| 变体 | 内容 | CH5 raw |
 | --- | --- | --- |
-| 官方例程写法（实验 1，同固件内） | `unit={.unit_id}` + `bw=DEFAULT` | **1701** ✅ |
-| `current_sense.c`（实验 1，同固件内） | `unit={.unit_id, .clk_src=RTC_DEFAULT, .ulp_mode=DISABLE}` + `bw=12` | **3467** ❌ |
-| 手写同配置（实验 4，独立固件，4 次） | 与上面**逐字段相同** | **1699~1710** ✅ |
-| 配置穷举（实验 3） | 4 种组合都试过 | 全部 **~1700** ✅ |
+| V1 | `main.c` 里 inline | 1692 ~ 1702 ✅ |
+| — | 组件里**逐字复制**的同一段代码 | 1693 ~ 1709 ✅ |
+| V2 | 换成文件作用域 `s_unit` | 1691 ~ 1703 ✅ |
+| V3 | 再换成 `s_a.chan` / `s_b.chan` | 1696 ~ 1707 ✅ |
+| V4 | 再建两个 curve-fitting 校准句柄 | 1697 ~ 1710 ✅ |
+| **C** | **`current_sense_init()` 正式路径** | **3464 ~ 3468 ❌** |
 
-预处理后的取值完全一致，`sdkconfig` 完全一致，但行为不同。
-**尚未定位到差异点。** 我最后想做的"同二进制内 `new_unit` 后立即插桩 + 手写路径对照"那次编译失败了（`diagnostics` 工程 `motor.h` 路径问题，已修），没有拿到数据。
+V4 与 C 的差别只剩：`ADC_UNIT_1` vs `(adc_unit_t)BOARD_CS_ADC_UNIT`、
+`ADC_ATTEN_DB_12` vs `CS_ATTEN`、`ADC_BITWIDTH_12` vs `CS_BITWIDTH`、`ESP_ERROR_CHECK` vs `ESP_RETURN_ON_ERROR`。
+这些宏在运行时的实际取值已打印验证过**完全相同**（`logs/` 中 `[DEBUG]` 行）：
 
-剩余待查方向（**均为假设，未经实测**）：
+```text
+unit_cfg: unit_id=1 clk_src=18 ulp_mode=0 | chan_cfg: atten=3 bitwidth=12
+macros: ADC_UNIT=1 CH_A=5 CH_B=4 CS_ATTEN=3 CS_BITWIDTH=12
+```
 
-1. `current_sense.c` 里 `const adc_oneshot_chan_cfg_t chan_cfg`（`.rodata`）与手写版非 `const`（栈）的实参形态差异是否影响驱动取配置。
-2. `current_sense.c` 使用 `static cs_ctx_t s_cs`（大结构体在 `.bss`）间接持有 `unit` 句柄，与全局裸句柄是否有差异。
-3. 驱动层是否有依赖"调用前 ADC 电源域/RTC 时钟状态"的分支；两者在 `new_unit` 之前的**运行历史**（`printf`、`esp_chip_info`、`vTaskDelay` 次数与时序）不同。
-4. 是否与 `CONFIG_SOC_ADC_SHARED_POWER=y` 下的 ADC 上电时序竞态有关（`new_unit` 一返回就读到 4095 满量程，符合"采样保持未正常建立"的表现，但这是推测）。
+**所以差异到底在哪一行，至今没有定位到。** 已知的“旧写法坏、新写法好”是稳定可复现的事实。
 
-**建议的第一步**：写一个固件，在**同一次启动内**依次做
-`(a) 手写路径 → 读 → del_unit → (b) current_sense 路径 → 读`，
-并打印 `adc_oneshot_new_unit()` / `adc_oneshot_config_channel()` 的返回码、以及每一步之后的 raw。
-如果 (a) 正常 (b) 不正常，再逐个把 `current_sense_init()` 改写成 (a) 的形式（先去掉 `const`、再换掉 `s_cs` 间接句柄），二分出翻转点。
+后续可查方向（**均为假设，未实测**）：
+
+1. 旧版把 unit 句柄放在 `static cs_ctx_t s_cs` 里，新版放文件作用域裸变量——虽已验证 V2 无影响，但 V2 少了 `cs_ctx_t` 里其它成员的写入。
+2. 旧版 `read_mv()` 与 `current_sense_calibrate()` 是分开的函数；新版读逻辑在 `poll_one()` 里。
+3. 旧版只建 1 个校准句柄且 `.chan` 未赋值；新版每通道 1 个（这一条是明确应该改的，但单独改它并不能修好）。
+4. 是否有 `esp_adc` 驱动侧依赖“调用前 ADC 电源域/RTC 时钟状态”的分支（`new_unit` 后立刻读到 4095 满量程，符合采样保持未正常建立的表现，但这是推测）。
 
 ---
 
@@ -305,6 +335,7 @@ I (574) current: 零点校准完成: A=3360.1 mV  B=16.3 mV  (共 256 次采样)
 | `diagnostics/logs/07_handwritten_project_config_x4.log` | 手写等价配置 ×4（实验 4） |
 | `diagnostics/logs/08_order_change_no_effect.log` | 调整 `current_sense_init` 调用顺序，无效 |
 | `diagnostics/logs/09_i2c_probe_5_resets.log` | AS5600 探测 5 次成功 / 1 次失败（现象 B） |
+| `diagnostics/logs/10_fixed_working.log` | **修复后**的完整固件日志（两路 1655.4 mV，电流随电机摆动） |
 | `diagnostics/adc_ab_test/` | **可直接编译运行**的诊断工程（4 组实验在同一个固件内） |
 
 ---
