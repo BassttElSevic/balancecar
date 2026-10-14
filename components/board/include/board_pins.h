@@ -40,6 +40,14 @@
 /* 占空比换算: compare = duty * PEAK */
 #define MOTOR_PWM_PEAK_TICKS    (MOTOR_PWM_PERIOD_TICKS / 2)
 
+/* ---- 母线电压 / 相电压上限 (V) ---- */
+/* ★ 必须按实际给驱动板供电的电压修改 ★
+ * L6234 的输出相电压 = duty * 母线电压，FOC 调制需要知道这个值 */
+#define MOTOR_SUPPLY_V          3.3f
+/* 正弦调制的线性区：相电压基波幅值不超过母线的一半；
+ * 用空间矢量调制时可改到 MOTOR_SUPPLY_V / √3 */
+#define MOTOR_VOLTAGE_LIMIT     (MOTOR_SUPPLY_V * 0.5f)
+
 /* ============================================================================
  *  2. 电流采样 (INA240 x2 -> ADC1)
  *
