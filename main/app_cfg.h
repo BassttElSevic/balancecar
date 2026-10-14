@@ -57,6 +57,12 @@
 /** 1=跑我的零点扫描标定(非官方); 0=纯官方对齐（此时 Id 应本来就 ≈0）*/
 #define APP_RUN_OFFSET_SWEEP           0
 
+/**
+ * 1=跑非官方的"固定电角度极点判定"（方法有误，会覆盖官方结果）
+ * 0=关掉，沿用官方 alignCurrentSense 的判定
+ */
+#define APP_RUN_SIGN_CAL               0
+
 #define APP_ALIGN_ZERO_OFFSET       0.0f    /**< 基准偏移；标定由 offset_sweep 完成 */
 
 #define APP_OFFSET_STEP_DEG         45.0f   /**< 标定扫描步进 (电角度) */

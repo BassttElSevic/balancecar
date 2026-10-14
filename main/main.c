@@ -342,6 +342,7 @@ typedef struct {
     float avg_q;
 } sign_candidate_t;
 
+#if APP_RUN_SIGN_CAL
 static void sign_measure(foc_motor_t *m, float sign_a, float sign_b,
                          float *out_d, float *out_q)
 {
@@ -428,6 +429,7 @@ static void sign_calibration_test(foc_motor_t *m)
     s_ctrl_paused = false;
     vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
 }
+#endif /* APP_RUN_SIGN_CAL */
 
 /* ============================================================================ */
 
@@ -481,6 +483,12 @@ void app_main(void)
     if (align_err == ESP_OK) {
         const esp_err_t cs_err = foc_motor_align_current_sense(&s_foc);
         printf("    电流采样对齐: %s\n", esp_err_to_name(cs_err));
+        printf("    => 官方判定: swap=%d  sign_a=%+.0f  sign_b=%+.0f  gain_a=%.4f  gain_b=%.4f\n",
+               (int)current_sense_get_swap(&s_cs),
+               (double)current_sense_get_sign_a(&s_cs),
+               (double)current_sense_get_sign_b(&s_cs),
+               (double)current_sense_get_gain_a(&s_cs),
+               (double)current_sense_get_gain_b(&s_cs));
     }
     if (align_err != ESP_OK) {
         printf("    对齐失败，停止。\n");
@@ -502,7 +510,11 @@ void app_main(void)
 #endif
 
     /* ---- 相电流极性自动判定 ---- */
+#if APP_RUN_SIGN_CAL
     sign_calibration_test(&s_foc);
+#else
+    printf("    （APP_RUN_SIGN_CAL=0：不跑非官方的极性判定，沿用官方 alignCurrentSense 结果）\n");
+#endif
 
     /* ---- A) 基线：使能但不给电压 ---- */
     const float iq_base = stage("A) 基线 (0 V，电机应静止)", APP_CS_V_ZERO,
