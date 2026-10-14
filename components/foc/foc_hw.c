@@ -14,6 +14,9 @@
 
 static const char *TAG = "foc_hw";
 
+/** 每多少次写 PWM 打一次点（诊断用）*/
+#define FOC_DRV_LOG_EVERY   200
+
 /* -------------------------------------------------------------------------- */
 /*  三相驱动适配                                                               */
 /* -------------------------------------------------------------------------- */
@@ -34,6 +37,15 @@ static esp_err_t drv_set_phase_voltage(void *ctx, float ua, float ub, float uc, 
     const float da = foc_clampf(ua / vlimit, FOC_DUTY_MIN, FOC_DUTY_MAX);
     const float db = foc_clampf(ub / vlimit, FOC_DUTY_MIN, FOC_DUTY_MAX);
     const float dc = foc_clampf(uc / vlimit, FOC_DUTY_MIN, FOC_DUTY_MAX);
+
+    /* 每 FOC_DRV_LOG_EVERY 次打一次点，确认电压真的下到了占空比 */
+    static uint32_t s_calls;
+    if ((s_calls++ % FOC_DRV_LOG_EVERY) == 0) {
+        ESP_LOGI(TAG, "PWM: U/V/W = %+.2f/%+.2f/%+.2f V -> duty %.3f/%.3f/%.3f (vlimit %.1f, en=%d)",
+                 (double)ua, (double)ub, (double)uc,
+                 (double)da, (double)db, (double)dc,
+                 (double)vlimit, (int)s_driver_enabled);
+    }
     return motor_set_duty(da, db, dc);
 }
 
