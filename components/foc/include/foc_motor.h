@@ -80,6 +80,9 @@
 /* 极对数自检容差 (rad)：实测转动 x 极对数 与 2π 之差超过它就告警 */
 #define FOC_PP_CHECK_TOLERANCE  0.5f
 
+/** 方向标定时每隔多少步打印一次进度（0=不打印）*/
+#define FOC_ALIGN_PROGRESS_STEPS  100
+
 /* 传感器方向（对应官方 Direction 枚举）*/
 #define FOC_SENSOR_DIR_UNKNOWN   0.0f   /**< 自动判定 */
 #define FOC_SENSOR_DIR_CW        1.0f   /**< 顺时针 */

@@ -701,11 +701,23 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
     if (m->sensor_direction == 0.0f) {
         ESP_LOGI(TAG, "对齐: 扫描电角度一个整圈，判定传感器方向...");
 
+        ESP_LOGI(TAG, "施加 %.2f V（driver vlimit=%.1fV），θe 从 270° 扫到 630°",
+                 (double)voltage_align, (double)m->driver->voltage_limit);
+        m->sensor->update(m->sensor->ctx);
+        ESP_LOGI(TAG, "扫描前: 单圈=%.4f rad  多圈=%.4f rad", 
+                 (double)m->sensor->get_mechanical_angle(m->sensor->ctx),
+                 (double)m->sensor->get_angle(m->sensor->ctx));
+
         /* 正向扫一个电周期 */
         for (int i = 0; i <= FOC_ALIGN_STEPS; i++) {
             (void)foc_motor_set_phase_voltage(m, voltage_align, 0.0f,
                                               FOC_3PI_2 + step * (float)i);
             m->sensor->update(m->sensor->ctx);
+            if ((i % FOC_ALIGN_PROGRESS_STEPS) == 0) {
+                ESP_LOGI(TAG, "  正扫 i=%3d θe=%6.1f°  单圈=%.4f rad",
+                         i, (double)((FOC_3PI_2 + step * (float)i) * FOC_RAD_TO_DEG),
+                         (double)m->sensor->get_mechanical_angle(m->sensor->ctx));
+            }
             vTaskDelay(pdMS_TO_TICKS(FOC_ALIGN_STEP_DELAY_MS));
         }
         m->sensor->update(m->sensor->ctx);
@@ -716,6 +728,11 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
             (void)foc_motor_set_phase_voltage(m, voltage_align, 0.0f,
                                               FOC_3PI_2 + step * (float)i);
             m->sensor->update(m->sensor->ctx);
+            if ((i % FOC_ALIGN_PROGRESS_STEPS) == 0) {
+                ESP_LOGI(TAG, "  反扫 i=%3d θe=%6.1f°  单圈=%.4f rad",
+                         i, (double)((FOC_3PI_2 + step * (float)i) * FOC_RAD_TO_DEG),
+                         (double)m->sensor->get_mechanical_angle(m->sensor->ctx));
+            }
             vTaskDelay(pdMS_TO_TICKS(FOC_ALIGN_STEP_DELAY_MS));
         }
         m->sensor->update(m->sensor->ctx);
