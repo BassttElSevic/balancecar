@@ -88,6 +88,9 @@ esp_err_t current_sense_init(current_sense_t *cs, const current_sense_cfg_t *cfg
     cs->v_per_a     = c.shunt_ohms * c.amp_gain;
     cs->sign_a      = c.sign_a;
     cs->sign_b      = c.sign_b;
+    /* 相级符号默认 +1（官方 alignCurrentSense 会按需翻成 -1）*/
+    cs->phase_sign_a = CURRENT_SENSE_SIGN_POS;
+    cs->phase_sign_b = CURRENT_SENSE_SIGN_POS;
 
     ESP_RETURN_ON_FALSE(cs->v_per_a > 0.0f, ESP_ERR_INVALID_ARG, TAG,
                         "灵敏度无效 (shunt=%f gain=%f)", (double)c.shunt_ohms, (double)c.amp_gain);
@@ -199,13 +202,12 @@ esp_err_t current_sense_calibrate(current_sense_t *cs)
     /* 与 SimpleFOC 一致：i = (v - offset) * gain，gain 带符号 */
     const float raw_a = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V;
     const float raw_b = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V;
-    if (cs->swap_channels) {
-        cs->ia = raw_b * cs->gain_b;
-        cs->ib = raw_a * cs->gain_a;
-    } else {
-        cs->ia = raw_a * cs->gain_a;
-        cs->ib = raw_b * cs->gain_b;
-    }
+    /* 通道层：raw × gain（gain 由 board_pins 的 *_SIGN 得到） */
+    const float ch_a = raw_a * cs->gain_a;
+    const float ch_b = raw_b * cs->gain_b;
+    /* 相层：先按 swap 选路，再乘相级符号（与 swap 无关） */
+    cs->ia = (cs->swap_channels ? ch_b : ch_a) * cs->phase_sign_a;
+    cs->ib = (cs->swap_channels ? ch_a : ch_b) * cs->phase_sign_b;
     cs->ic = -cs->ia - cs->ib;
 
     ESP_LOGI(TAG, "零点校准完成 (%d 次): A=%.1f mV  B=%.1f mV",
@@ -258,21 +260,20 @@ bool current_sense_get_swap(const current_sense_t *cs)       { return cs ? cs->s
 void current_sense_set_sign_a(current_sense_t *cs, float sign)
 {
     if (!cs) return;
-    cs->sign_a = (sign < 0.0f) ? CURRENT_SENSE_SIGN_NEG : CURRENT_SENSE_SIGN_POS;
-    apply_gains(cs);
+    /* 相级符号：与 swap 无关，直接作用在 ia 上 */
+    cs->phase_sign_a = (sign < 0.0f) ? CURRENT_SENSE_SIGN_NEG : CURRENT_SENSE_SIGN_POS;
 }
 
 void current_sense_set_sign_b(current_sense_t *cs, float sign)
 {
     if (!cs) return;
-    cs->sign_b = (sign < 0.0f) ? CURRENT_SENSE_SIGN_NEG : CURRENT_SENSE_SIGN_POS;
-    apply_gains(cs);
+    cs->phase_sign_b = (sign < 0.0f) ? CURRENT_SENSE_SIGN_NEG : CURRENT_SENSE_SIGN_POS;
 }
 
 float current_sense_get_gain_a(const current_sense_t *cs) { return cs ? cs->gain_a : 0.0f; }
 float current_sense_get_gain_b(const current_sense_t *cs) { return cs ? cs->gain_b : 0.0f; }
-float current_sense_get_sign_a(const current_sense_t *cs) { return cs ? cs->sign_a : 0.0f; }
-float current_sense_get_sign_b(const current_sense_t *cs) { return cs ? cs->sign_b : 0.0f; }
+float current_sense_get_sign_a(const current_sense_t *cs) { return cs ? cs->phase_sign_a : 0.0f; }
+float current_sense_get_sign_b(const current_sense_t *cs) { return cs ? cs->phase_sign_b : 0.0f; }
 
 bool     current_sense_is_calibrated(const current_sense_t *cs) { return cs ? cs->calibrated : false; }
 uint32_t current_sense_get_err_count(const current_sense_t *cs) { return cs ? cs->err_count : 0; }

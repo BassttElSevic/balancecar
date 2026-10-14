@@ -83,8 +83,10 @@ typedef struct {
     float          v_per_a;                /**< 灵敏度 (V/A)，正数 */
     float          sign_a;                 /**< A 相极性 +1/-1 */
     float          sign_b;                 /**< B 相极性 +1/-1 */
-    float          gain_a;                 /**< A 相增益 (A/V)，带符号 */
-    float          gain_b;                 /**< B 相增益 (A/V)，带符号 */
+    float          gain_a;                 /**< 通道 A 增益 (A/V)，带符号（硬件层，来自 board_pins）*/
+    float          gain_b;                 /**< 通道 B 增益 (A/V)，带符号（硬件层，来自 board_pins）*/
+    float          phase_sign_a;           /**< 相 A 符号 (+1/-1)，作用在 ia 上，与 swap 无关 */
+    float          phase_sign_b;           /**< 相 B 符号 (+1/-1)，作用在 ib 上，与 swap 无关 */
     float          off_a_mv;               /**< A 相零点 (mV) */
     float          off_b_mv;               /**< B 相零点 (mV) */
     int            cal_samples;            /**< 校准采样次数 */
@@ -144,6 +146,11 @@ float current_sense_get_offset_mv_b(const current_sense_t *cs);
 void   current_sense_set_swap(current_sense_t *cs, bool swap);
 bool   current_sense_get_swap(const current_sense_t *cs);
 
+/**
+ * @brief 设置相 A/B 的符号 (+1/-1)
+ * @note  这是**相级**的：无论 swap 与否都作用在 ia / ib 上。
+ *        与通道增益 gain_a/gain_b 分开，避免 swap 之后翻错通道。
+ */
 void current_sense_set_sign_a(current_sense_t *cs, float sign);
 void current_sense_set_sign_b(current_sense_t *cs, float sign);
 
