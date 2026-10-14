@@ -322,6 +322,7 @@ void app_main(void)
     cfg.pole_pairs           = MOTOR_POLE_PAIRS;
     cfg.voltage_limit        = MOTOR_VOLTAGE_LIMIT;
     cfg.voltage_sensor_align = MOTOR_ALIGN_VOLTAGE_V;
+    cfg.align_zero_offset    = APP_ALIGN_ZERO_OFFSET;
     cfg.current_limit        = MOTOR_CURRENT_LIMIT_A;
     cfg.velocity_limit       = MOTOR_VELOCITY_LIMIT_RADS;
     cfg.modulation           = FOC_MOD_SINE_PWM;

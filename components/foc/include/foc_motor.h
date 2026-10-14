@@ -64,6 +64,10 @@
 #define FOC_ALIGN_STEPS             500
 #define FOC_ALIGN_STEP_DELAY_MS     2
 #define FOC_ALIGN_SETTLE_MS         200
+/* d/q 轴系偏差修正：对齐算出的零点若与实际 q 轴差一个固定角，
+ * 就用它补上（实测确定：命令 q 轴电压而响应全落在 d 轴上 -> 差 90°）*/
+#define FOC_ALIGN_ZERO_OFFSET_DEFAULT   0.0f
+
 /* 极对数自检容差 (rad)：实测转动 x 极对数 与 2π 之差超过它就告警 */
 #define FOC_PP_CHECK_TOLERANCE  0.5f
 
@@ -86,6 +90,7 @@ typedef struct {
     float    current_limit;          /**< 电流上限 (A) */
     float    velocity_limit;         /**< 速度上限 (rad/s) */
     float    voltage_sensor_align;   /**< 传感器对齐时施加的电压 (V) */
+    float    align_zero_offset;      /**< 对齐零点附加偏移 (rad)，修正 d/q 轴系偏差 */
 
     /* ---- 控制方式 ---- */
     foc_torque_ctrl_t torque_ctrl;   /**< 力矩环方式 */
@@ -128,6 +133,7 @@ typedef struct {
     float    current_limit;
     float    velocity_limit;
     float    voltage_sensor_align;
+    float    align_zero_offset;       /**< 对齐零点附加偏移 (rad) */
     foc_torque_ctrl_t torque_ctrl;
     foc_motion_t      motion;
     foc_modulation_t  modulation;

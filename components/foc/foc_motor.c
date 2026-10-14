@@ -47,6 +47,7 @@ void foc_motor_default_cfg(foc_motor_cfg_t *cfg)
     cfg->current_limit         = FOC_DEF_CURRENT_LIM;
     cfg->velocity_limit        = FOC_DEF_VEL_LIM;
     cfg->voltage_sensor_align  = FOC_DEF_VOLTAGE_SENSOR_ALIGN;
+    cfg->align_zero_offset     = FOC_ALIGN_ZERO_OFFSET_DEFAULT;
 
     cfg->torque_ctrl           = FOC_TORQUE_VOLTAGE;
     cfg->motion                = FOC_MOTION_TORQUE;
@@ -124,6 +125,7 @@ esp_err_t foc_motor_init(foc_motor_t *m, const foc_motor_cfg_t *cfg,
     m->current_limit        = cfg->current_limit;
     m->velocity_limit       = cfg->velocity_limit;
     m->voltage_sensor_align = cfg->voltage_sensor_align;
+    m->align_zero_offset    = cfg->align_zero_offset;
     m->torque_ctrl          = cfg->torque_ctrl;
     m->motion               = cfg->motion;
     m->modulation           = cfg->modulation;
@@ -615,15 +617,19 @@ esp_err_t foc_motor_align_sensor(foc_motor_t *m)
     m->sensor->update(m->sensor->ctx);
     m->zero_electric_angle = 0.0f;
     m->zero_electric_angle = foc_motor_electrical_angle(m);
+    /* 补上 d/q 轴系的固定偏差 */
+    m->zero_electric_angle = foc_normalize_angle(m->zero_electric_angle
+                                                 + m->align_zero_offset);
     vTaskDelay(pdMS_TO_TICKS(20));
 
     (void)foc_motor_set_phase_voltage(m, 0.0f, 0.0f, 0.0f);
     vTaskDelay(pdMS_TO_TICKS(FOC_ALIGN_SETTLE_MS));
 
     m->aligned = true;
-    ESP_LOGI(TAG, "对齐完成: zero_electric_angle=%.4f rad (%.1f°)  direction=%+.0f",
+    ESP_LOGI(TAG, "对齐完成: zero_electric_angle=%.4f rad (%.1f°)  direction=%+.0f  偏移=%+.1f°",
              (double)m->zero_electric_angle,
              (double)(m->zero_electric_angle * FOC_RAD_TO_DEG),
-             (double)m->sensor_direction);
+             (double)m->sensor_direction,
+             (double)(m->align_zero_offset * FOC_RAD_TO_DEG));
     return ESP_OK;
 }
