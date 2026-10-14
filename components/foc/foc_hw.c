@@ -134,10 +134,17 @@ static void cur_update(void *ctx)
     (void)current_sense_update((current_sense_t *)ctx);
 }
 
+static void cur_set_sign_a(void *ctx, float sign) { current_sense_set_sign_a((current_sense_t *)ctx, sign); }
+static void cur_set_sign_b(void *ctx, float sign) { current_sense_set_sign_b((current_sense_t *)ctx, sign); }
+static void cur_set_swap(void *ctx, bool swap)    { current_sense_set_swap((current_sense_t *)ctx, swap); }
+
 static const foc_current_t s_current = {
     .ctx        = NULL,   /* 由 foc_hw_current_init 填 cs */
     .update     = cur_update,
     .read_phase = cur_read_phase,
+    .set_sign_a = cur_set_sign_a,
+    .set_sign_b = cur_set_sign_b,
+    .set_swap   = cur_set_swap,
 };
 
 void foc_hw_current_init(foc_current_t *out, current_sense_t *cs)

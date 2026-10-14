@@ -68,6 +68,15 @@
  * 就用它补上（实测确定：命令 q 轴电压而响应全落在 d 轴上 -> 差 90°）*/
 #define FOC_ALIGN_ZERO_OFFSET_DEFAULT   0.0f
 
+/* 电流采样对齐（对应 SimpleFOC CurrentSense::alignBLDCDriver）*/
+#define FOC_CS_ALIGN_RAMP_STEPS  100     /**< 单相升压斜坡步数 */
+#define FOC_CS_ALIGN_STEP_MS     3       /**< 每步延时 */
+#define FOC_CS_ALIGN_SETTLE_MS   500     /**< 升压后稳定时间 */
+#define FOC_CS_ALIGN_AVG_N       10      /**< 取平均次数 */
+#define FOC_CS_ALIGN_AVG_MS      10      /**< 取平均间隔 */
+#define FOC_CS_ALIGN_MIN_A       0.1f    /**< 判定有效的最小电流 (A) */
+#define FOC_CS_ALIGN_MIN_RATIO   1.5f    /**< 两路电流幅值比的下限 */
+
 /* 极对数自检容差 (rad)：实测转动 x 极对数 与 2π 之差超过它就告警 */
 #define FOC_PP_CHECK_TOLERANCE  0.5f
 
@@ -216,6 +225,16 @@ void foc_motor_set_angle_p(foc_motor_t *m, float p);
  * @note 会施加 voltage_sensor_align 的电压让转子对齐，必须是空载
  */
 esp_err_t foc_motor_align_sensor(foc_motor_t *m);
+
+/**
+ * @brief 电流采样对齐（SimpleFOC FOCMotor::alignCurrentSense -> alignBLDCDriver）
+ *
+ * 单独给某一相加电压并读两路采样，判定：
+ *   - 哪一个采样通道对应哪一相（需要时自动交换）
+ *   - 每相采样的极性（需要时自动翻转符号）
+ * 不需要按住转子。
+ */
+esp_err_t foc_motor_align_current_sense(foc_motor_t *m);
 
 /** @brief 当前电角度（含 zero_electric_angle 与方向） */
 float foc_motor_electrical_angle(const foc_motor_t *m);

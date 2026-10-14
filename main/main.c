@@ -195,6 +195,87 @@ static void wait_operator(const char *prompt, int timeout_ms)
 }
 
 /*
+ * 零点偏移标定（扫一圈找 |Id| 最小）
+ *
+ * 现象: 不管把 zero_electric_angle 补多少, 命令 q 轴电压时电流总落在 d 轴上。
+ * 说明偏差不是能一口说准的固定角, 也不能靠猜。
+ *
+ * 做法: 施加直流矢量、转子按住不动, 让 zero_electric_angle 从 base 起
+ * 逐点 +N 度。每换一个偏移, 同一个电流矢量在 dq 坐标系里就转 N 度。
+ * 找到【|Id| 最小 / Iq 最大】的那一点, 就是正确的零点。
+ *
+ * 注意: 这个标定必须让转子【不动】。转子一动, 电压矢量就跟着编码器转,
+ *       测到的就不是纯电阻响应了。
+ */
+static float offset_sweep(foc_motor_t *m)
+{
+    printf("\n---- 零点偏移标定 (直流矢量 %.2f V, 转子请按住不动) ----\n",
+           (double)APP_OFFSET_V);
+    printf("      %-10s %-10s %-10s %-10s %s\n", "偏移(°)", "Id", "Iq", "|I|", "评定");
+
+    s_ctrl_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
+
+    const float base      = m->zero_electric_angle;
+    const float step      = APP_OFFSET_STEP_DEG / RAD2DEG;
+    const int   n         = APP_OFFSET_AVG_MS / APP_TELEMETRY_MS;
+
+    float best_off = 0.0f, best_iq = -1e9f, best_id = 0.0f;
+    bool  have = false;
+
+    for (int k = 0; k < APP_OFFSET_STEPS; k++) {
+        const float off = step * (float)k;
+        m->zero_electric_angle = foc_normalize_angle(base + off);
+
+        /* 施加直流矢量（运动方式仍是力矩 -> 电压跟着编码器走；
+         * 转子被按住不动，所以场是静止的） */
+        m->motion      = FOC_MOTION_TORQUE;
+        m->torque_ctrl = FOC_TORQUE_VOLTAGE;
+        m->target      = APP_OFFSET_V;
+        s_ctrl_paused  = false;
+        vTaskDelay(pdMS_TO_TICKS(APP_OFFSET_SETTLE_MS));
+
+        float sd = 0.0f, sq = 0.0f;
+        for (int i = 0; i < n; i++) {
+            vTaskDelay(pdMS_TO_TICKS(APP_TELEMETRY_MS));
+            sd += m->current.d;
+            sq += m->current.q;
+        }
+        s_ctrl_paused = true;
+        m->target = APP_CS_V_ZERO;
+        vTaskDelay(pdMS_TO_TICKS(APP_OFFSET_SETTLE_MS));
+
+        const float ad = sd / (float)n;
+        const float aq = sq / (float)n;
+        const float mag = sqrtf(ad * ad + aq * aq);
+
+        printf("      %+8.0f  %+9.3f  %+9.3f  %+9.3f  %s\n",
+               (double)(off * RAD2DEG), (double)ad, (double)aq, (double)mag,
+               (fabsf(ad) < 0.05f) ? "Id 接近 0" : "");
+        fflush(stdout);
+
+        if (!have || aq > best_iq) {
+            best_off = off;
+            best_id  = ad;
+            best_iq  = aq;
+            have     = true;
+        }
+    }
+
+    m->zero_electric_angle = foc_normalize_angle(base + best_off);
+    printf("\n      => 最佳偏移 %+.0f°   (Id=%+.3f  Iq=%+.3f)\n",
+           (double)(best_off * RAD2DEG), (double)best_id, (double)best_iq);
+    printf("         原始对齐值 %.1f° + 偏移 %+.0f° = %.1f°\n",
+           (double)(base * RAD2DEG), (double)(best_off * RAD2DEG),
+           (double)(foc_normalize_angle(base + best_off) * RAD2DEG));
+
+    vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
+    s_ctrl_paused = false;
+    vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
+    return best_off;
+}
+
+/*
  * 相电流极性自动判定
  *
  * 思路（对应 SimpleFOC 注释里的 "this should be automated later"）:
@@ -346,6 +427,10 @@ void app_main(void)
            esp_err_to_name(align_err), (double)s_foc.sensor_direction,
            (double)s_foc.zero_electric_angle,
            (double)(s_foc.zero_electric_angle * RAD2DEG));
+    if (align_err == ESP_OK) {
+        const esp_err_t cs_err = foc_motor_align_current_sense(&s_foc);
+        printf("    电流采样对齐: %s\n", esp_err_to_name(cs_err));
+    }
     if (align_err != ESP_OK) {
         printf("    对齐失败，停止。\n");
         motor_enable(false);
@@ -355,6 +440,10 @@ void app_main(void)
     xTaskCreatePinnedToCore(foc_ctrl_task, "foc", CTRL_TASK_STACK, NULL,
                             CTRL_TASK_PRIO, NULL, CTRL_TASK_CORE);
     vTaskDelay(pdMS_TO_TICKS(APP_CTRL_SETTLE_MS));
+
+    /* ---- 零点偏移标定（需要按住转子） ---- */
+    wait_operator("零点是歪的，请用手按住转子别让它动，然后按回车开始标定", APP_CS_PROMPT_MS);
+    (void)offset_sweep(&s_foc);
 
     /* ---- 相电流极性自动判定 ---- */
     sign_calibration_test(&s_foc);

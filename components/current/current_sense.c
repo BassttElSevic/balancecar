@@ -197,8 +197,15 @@ esp_err_t current_sense_calibrate(current_sense_t *cs)
 
     /* 用零点重新算一次三相，让校准后的诊断输出有意义 */
     /* 与 SimpleFOC 一致：i = (v - offset) * gain，gain 带符号 */
-    cs->ia = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V * cs->gain_a;
-    cs->ib = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V * cs->gain_b;
+    const float raw_a = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V;
+    const float raw_b = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V;
+    if (cs->swap_channels) {
+        cs->ia = raw_b * cs->gain_b;
+        cs->ib = raw_a * cs->gain_a;
+    } else {
+        cs->ia = raw_a * cs->gain_a;
+        cs->ib = raw_b * cs->gain_b;
+    }
     cs->ic = -cs->ia - cs->ib;
 
     ESP_LOGI(TAG, "零点校准完成 (%d 次): A=%.1f mV  B=%.1f mV",
@@ -216,8 +223,15 @@ esp_err_t current_sense_update(current_sense_t *cs)
                         TAG, "读 B 相失败");
 
     /* 与 SimpleFOC 一致：i = (v - offset) * gain，gain 带符号 */
-    cs->ia = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V * cs->gain_a;
-    cs->ib = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V * cs->gain_b;
+    const float raw_a = ((float)cs->mv_a - cs->off_a_mv) / MV_PER_V;
+    const float raw_b = ((float)cs->mv_b - cs->off_b_mv) / MV_PER_V;
+    if (cs->swap_channels) {
+        cs->ia = raw_b * cs->gain_b;
+        cs->ib = raw_a * cs->gain_a;
+    } else {
+        cs->ia = raw_a * cs->gain_a;
+        cs->ib = raw_b * cs->gain_b;
+    }
     cs->ic = -cs->ia - cs->ib;      /* 基尔霍夫 */
     return ESP_OK;
 }
@@ -237,6 +251,9 @@ int current_sense_get_mv_b(const current_sense_t *cs)  { return cs ? cs->mv_b  :
 
 float current_sense_get_offset_mv_a(const current_sense_t *cs) { return cs ? cs->off_a_mv : 0.0f; }
 float current_sense_get_offset_mv_b(const current_sense_t *cs) { return cs ? cs->off_b_mv : 0.0f; }
+
+void current_sense_set_swap(current_sense_t *cs, bool swap)  { if (cs) cs->swap_channels = swap; }
+bool current_sense_get_swap(const current_sense_t *cs)       { return cs ? cs->swap_channels : false; }
 
 void current_sense_set_sign_a(current_sense_t *cs, float sign)
 {

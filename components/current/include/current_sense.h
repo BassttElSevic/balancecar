@@ -76,6 +76,7 @@ typedef struct {
     int            gpio_a;                 /**< A 相引脚（日志用） */
     int            gpio_b;                 /**< B 相引脚（日志用） */
 
+    bool           swap_channels;          /**< 交换前两相（对齐用）*/
     bool           ready;                  /**< 内部 */
     bool           calibrated;             /**< 是否已做过零点校准 */
 
@@ -139,6 +140,10 @@ float current_sense_get_offset_mv_b(const current_sense_t *cs);
  * @note 与 SimpleFOC 的 gain_a/gain_b 同义：相电流接反时把它翻过来。
  *       改完立即生效（会重算 gain）。
  */
+/** @brief 交换前两相（SimpleFOC 对齐时若发现通道与相不匹配会交换） */
+void   current_sense_set_swap(current_sense_t *cs, bool swap);
+bool   current_sense_get_swap(const current_sense_t *cs);
+
 void current_sense_set_sign_a(current_sense_t *cs, float sign);
 void current_sense_set_sign_b(current_sense_t *cs, float sign);
 

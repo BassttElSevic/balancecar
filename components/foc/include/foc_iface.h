@@ -54,4 +54,8 @@ typedef struct {
     void *ctx;
     void  (*update)(void *ctx);                          /**< 刷新一次采样 */
     bool  (*read_phase)(void *ctx, foc_abc_t *out_abc);  /**< 读三相电流 (A) */
+    /* 对齐用（对应 SimpleFOC 的 gain_a/gain_b 与 pinA/pinB 交换）*/
+    void  (*set_sign_a)(void *ctx, float sign);          /**< 可空 */
+    void  (*set_sign_b)(void *ctx, float sign);          /**< 可空 */
+    void  (*set_swap)(void *ctx, bool swap);             /**< 可空 */
 } foc_current_t;

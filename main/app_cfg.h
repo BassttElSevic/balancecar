@@ -51,7 +51,13 @@
 /*  对齐零点偏移（修正 d/q 轴系固定偏差）                                      */
 /* -------------------------------------------------------------------------- */
 
-#define APP_ALIGN_ZERO_OFFSET       (FOC_PI_2)  /**< 实测 d/q 差 90°，先补 +90° */
+#define APP_ALIGN_ZERO_OFFSET       0.0f    /**< 基准偏移；标定由 offset_sweep 完成 */
+
+#define APP_OFFSET_STEP_DEG         45.0f   /**< 标定扫描步进 (电角度) */
+#define APP_OFFSET_STEPS            8       /**< 步数 (8 x 45 = 360) */
+#define APP_OFFSET_V                1.5f    /**< 标定用的直流矢量 (V) */
+#define APP_OFFSET_SETTLE_MS        300     /**< 每个偏移的稳定时间 */
+#define APP_OFFSET_AVG_MS           600     /**< 每个偏移的取平均窗口 */
 
 /* -------------------------------------------------------------------------- */
 /*  相电流极性自动判定                                                         */

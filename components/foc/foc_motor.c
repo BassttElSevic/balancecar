@@ -552,6 +552,137 @@ float foc_motor_move(foc_motor_t *m, float new_target)
     return m->target;
 }
 
+
+/* -------------------------------------------------------------------------- */
+/*  电流采样对齐（SimpleFOC CurrentSense::alignBLDCDriver 的移植）              */
+/* -------------------------------------------------------------------------- */
+
+/** @brief 只把某一相电压从 0 斜坡升到 v，另外两相保持零矢量 */
+static void cs_align_ramp(foc_motor_t *m, int phase, float v, float zero)
+{
+    float u[3] = { zero, zero, zero };
+    const float vlimit = m->driver->voltage_limit;
+
+    for (int i = 0; i < FOC_CS_ALIGN_RAMP_STEPS; i++) {
+        u[phase] = v * ((float)i / (float)FOC_CS_ALIGN_RAMP_STEPS) + zero;
+        (void)m->driver->set_phase_voltage(m->driver->ctx, u[0], u[1], u[2], vlimit);
+        vTaskDelay(pdMS_TO_TICKS(FOC_CS_ALIGN_STEP_MS));
+    }
+    vTaskDelay(pdMS_TO_TICKS(FOC_CS_ALIGN_SETTLE_MS));
+}
+
+/** @brief 读两路电流的平均值 */
+static void cs_align_read(foc_motor_t *m, float *out_a, float *out_b)
+{
+    float sa = 0.0f, sb = 0.0f;
+    for (int i = 0; i < FOC_CS_ALIGN_AVG_N; i++) {
+        foc_abc_t c = { FOC_ZERO, FOC_ZERO, FOC_ZERO };
+        (void)m->current_sense->read_phase(m->current_sense->ctx, &c);
+        sa += c.a;
+        sb += c.b;
+        vTaskDelay(pdMS_TO_TICKS(FOC_CS_ALIGN_AVG_MS));
+    }
+    *out_a = sa / (float)FOC_CS_ALIGN_AVG_N;
+    *out_b = sb / (float)FOC_CS_ALIGN_AVG_N;
+}
+
+/** @brief 关掉输出 */
+static void cs_align_off(foc_motor_t *m, float zero)
+{
+    (void)m->driver->set_phase_voltage(m->driver->ctx, zero, zero, zero,
+                                       m->driver->voltage_limit);
+    vTaskDelay(pdMS_TO_TICKS(FOC_CS_ALIGN_SETTLE_MS));
+}
+
+esp_err_t foc_motor_align_current_sense(foc_motor_t *m)
+{
+    ESP_RETURN_ON_FALSE(m && m->driver && m->current_sense,
+                        ESP_ERR_INVALID_STATE, TAG, "需要驱动与电流采样接口");
+    ESP_RETURN_ON_FALSE(m->current_sense->set_swap && m->current_sense->set_sign_a
+                        && m->current_sense->set_sign_b,
+                        ESP_ERR_NOT_SUPPORTED, TAG, "电流采样接口未提供对齐所需的回调");
+
+    const float vlimit = m->driver->voltage_limit;
+    const float zero   = m->modulation_centered ? (vlimit * FOC_MOD_CENTER_RATIO) : FOC_ZERO;
+    const float v      = m->voltage_sensor_align;
+    float ia = 0.0f, ib = 0.0f;
+
+    ESP_LOGI(TAG, "电流采样对齐: 逐相加压 %.1f V, 判定通道对应与极性", (double)v);
+
+    /* ---------------- 相 A ---------------- */
+    cs_align_ramp(m, 0, v, zero);
+    cs_align_read(m, &ia, &ib);
+    cs_align_off(m, zero);
+
+    /* SimpleFOC: 期望 Ia = +I, Ib = -I/2；给 A 相加压时幅值大的那一路就是 A 相 */
+    const float aa = fabsf(ia), ab = fabsf(ib);
+    const float maxc = (aa > ab) ? aa : ab;
+    const float minc = (aa > ab) ? ab : aa;
+    const float ratio = (minc > FOC_ZERO) ? (maxc / minc) : FOC_CS_ALIGN_MIN_RATIO;
+
+    if (maxc < FOC_CS_ALIGN_MIN_A) {
+        ESP_LOGE(TAG, "相 A: 电流太小 (A=%.3f B=%.3f)，请提高 voltage_sensor_align",
+                 (double)ia, (double)ib);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (ratio < FOC_CS_ALIGN_MIN_RATIO) {
+        ESP_LOGE(TAG, "相 A: 两路幅值太接近 (|A|=%.3f |B|=%.3f, 比 %.2f)，无法判定通道对应",
+                 (double)aa, (double)ab, (double)ratio);
+        return ESP_FAIL;
+    }
+
+    bool swapped = false;
+    if (ab > aa) {
+        /* 幅值大的在通道 B 上 -> 通道接反，交换 */
+        ESP_LOGW(TAG, "相 A: 最大电流在通道 B 上 -> 交换两路采样");
+        m->current_sense->set_swap(m->current_sense->ctx, true);
+        swapped = true;
+
+        /* 交换后重新测一次，拿到 A 相真实电流的符号 */
+        cs_align_ramp(m, 0, v, zero);
+        cs_align_read(m, &ia, &ib);
+        cs_align_off(m, zero);
+    }
+
+    if (ia < FOC_ZERO) {
+        ESP_LOGW(TAG, "相 A: 电流为负 (%.3f) -> 翻转 A 相极性", (double)ia);
+        m->current_sense->set_sign_a(m->current_sense->ctx, -1.0f);
+        cs_align_ramp(m, 0, v, zero);
+        cs_align_read(m, &ia, &ib);
+        cs_align_off(m, zero);
+    }
+    ESP_LOGI(TAG, "相 A: Ia=%+.3f A  Ib=%+.3f A  (交换=%d)", (double)ia, (double)ib, (int)swapped);
+
+    /* ---------------- 相 B ---------------- */
+    cs_align_ramp(m, 1, v, zero);
+    cs_align_read(m, &ia, &ib);
+    cs_align_off(m, zero);
+
+    const float ba = fabsf(ia), bb = fabsf(ib);
+    if (ba > bb) {
+        ESP_LOGE(TAG, "相 B: 最大电流落在通道 A 上 (|A|=%.3f |B|=%.3f)，通道对应关系不自洽",
+                 (double)ba, (double)bb);
+        return ESP_FAIL;
+    }
+    if (bb < FOC_CS_ALIGN_MIN_A) {
+        ESP_LOGE(TAG, "相 B: 电流太小 (%.3f)", (double)ib);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (ib < FOC_ZERO) {
+        ESP_LOGW(TAG, "相 B: 电流为负 (%.3f) -> 翻转 B 相极性", (double)ib);
+        m->current_sense->set_sign_b(m->current_sense->ctx, -1.0f);
+        cs_align_ramp(m, 1, v, zero);
+        cs_align_read(m, &ia, &ib);
+        cs_align_off(m, zero);
+    }
+    ESP_LOGI(TAG, "相 B: Ia=%+.3f A  Ib=%+.3f A", (double)ia, (double)ib);
+
+    /* C 相由基尔霍夫定律得出，无需单独判极性 */
+    ESP_LOGI(TAG, "电流采样对齐完成");
+    return ESP_OK;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  传感器对齐（SimpleFOC FOCMotor::alignSensor）                               */
 /* -------------------------------------------------------------------------- */
